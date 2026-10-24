@@ -84,6 +84,9 @@
     <div id="obo" class="hint">Loading…</div>
     <h2>Remaining (approximate)</h2>
     <div id="limits" class="hint">Run an agent to see your limits.</div>
+    <h2>Session</h2>
+    <p class="hint">Filter on this id in the <em>Run explorer</em> workbook.</p>
+    <p><code id="session"></code></p>
     <button id="newchat" type="button">New conversation</button>
   </aside>
 </main>
@@ -162,6 +165,8 @@
   }
 
   const log = $("log"); let history = [];
+  let sessionId = crypto.randomUUID();
+  $("session").textContent = sessionId;
   function add(kind, html) {
     const div = document.createElement("div"); div.className = `msg ${kind}`; div.innerHTML = html;
     log.appendChild(div); log.scrollTop = log.scrollHeight; return div;
@@ -174,6 +179,19 @@
   }
 
   // ----- identity panel and agents -----
+  function gatewayView(g) {
+    if (!g || g.error) return `<p>Gateway view unavailable (${esc(String(g && g.error))}).</p>`;
+    const u = (g.limits && g.limits.user) || {};
+    const n = (v) => (v === undefined ? "" : Number(v).toLocaleString());
+    return `<strong>Gateway view (GET /agents/me)</strong><dl>` +
+      `<dt>tier</dt><dd>${esc(g.tier)}</dd><dt>team</dt><dd>${esc(g.team)}</dd>` +
+      `<dt>cost center</dt><dd>${esc(g.costCenter || "")}</dd>` +
+      `<dt>agents</dt><dd>${esc((g.agents || []).join(", "))}</dd>` +
+      `<dt>tokens/min</dt><dd>${n(u.tokensPerMinute)}</dd><dt>tokens/day</dt><dd>${n(u.tokensPerDay)}</dd>` +
+      `<dt>tokens/month</dt><dd>${n(u.tokensPerMonth)}</dd>` +
+      `<dt>team pool/month</dt><dd>${n(g.limits && g.limits.teamTokensPerMonth)}</dd></dl>` +
+      `<p class="hint">Derived by APIM from your groups; not in the token.</p>`;
+  }
   api("/api/whoami").then(({ status, body }) => {
     if (status !== 200) { $("obo").textContent = body.error?.message || `HTTP ${status}`; return; }
     const row = (t) => `<dt>aud</dt><dd>${esc(String(t.aud))}</dd><dt>scp</dt><dd>${esc(String(t.scp))}</dd>` +
@@ -181,7 +199,8 @@
     const same = body.token_for_chat_app.oid === body.obo_token_for_gateway.oid;
     $("obo").innerHTML = `<strong>Your token → chat app</strong><dl>${row(body.token_for_chat_app)}</dl>` +
       `<strong>OBO token → gateway</strong><dl>${row(body.obo_token_for_gateway)}</dl>` +
-      (same ? `<p class="ok">Same user (oid) in both tokens: OBO is working.</p>` : `<p>oid differs!</p>`);
+      (same ? `<p class="ok">Same user (oid) in both tokens: OBO is working.</p>` : `<p>oid differs!</p>`) +
+      gatewayView(body.gateway_view);
   });
   const agents = await api("/api/agents");
   if (agents.status !== 200 || !Array.isArray(agents.body) || !agents.body.length) {
@@ -192,7 +211,9 @@
     add("agent", `<p>Signed in. You can use: ${agents.body.map((a) => `<strong>${esc(a.name)}</strong> (${esc(a.description)})`).join(", ")}.</p>`);
   }
 
-  $("newchat").onclick = () => { history = []; log.innerHTML = ""; };
+  $("newchat").onclick = () => {
+    history = []; log.innerHTML = ""; sessionId = crypto.randomUUID(); $("session").textContent = sessionId;
+  };
   $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("composer").requestSubmit(); } });
   $("composer").onsubmit = async (e) => {
     e.preventDefault();
@@ -201,7 +222,7 @@
     add("user", esc(input)); $("input").value = ""; $("send").disabled = true;
     const pending = add("agent", `<span class="hint">${esc(agent)} is working… (tools run on the server; this can take a minute)</span>`);
     const started = performance.now();
-    const { status, body, retryAfter } = await api("/api/chat", { method: "POST", body: JSON.stringify({ agent, input, history }) });
+    const { status, body, retryAfter } = await api("/api/chat", { method: "POST", body: JSON.stringify({ agent, input, history, session_id: sessionId }) });
     const secs = ((performance.now() - started) / 1000).toFixed(1);
     pending.remove(); $("send").disabled = false;
     if (status === 200) {

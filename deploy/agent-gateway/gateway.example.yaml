@@ -29,20 +29,22 @@ tiers:
     tokens_per_day: 300000
     tokens_per_month: 4000000
 
-# Teams share a monthly pool (and are the unit for chargeback). A user's team is the
+# Teams share a monthly pool and carry a numeric cost_center, which the gateway stamps on
+# every request (usage events, metrics, traces) for chargeback. A user's team is the
 # FIRST team whose group they belong to; users in none fall into default_team.
 teams:
   - name: secops
     group_id: 00000000-0000-0000-0000-00000000b001   # sg-team-secops
     tokens_per_month: 60000000
-    cost_center: CC-1001
+    cost_center: 1001
   - name: it-ops
     group_id: 00000000-0000-0000-0000-00000000b002   # sg-team-itops
     tokens_per_month: 20000000
-    cost_center: CC-1002
+    cost_center: 1002
 default_team:
   name: unassigned
   tokens_per_month: 5000000
+  cost_center: 9000   # optional: where unassigned usage is charged
 
 # Agents: membership of an agent's group grants access to it. Agent limits protect
 # shared capacity from one popular (or looping) agent. tokens_per_run is a hard

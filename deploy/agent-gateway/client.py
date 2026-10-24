@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("agent")
     run.add_argument("input")
     run.add_argument("--json", action="store_true", help="print the full response")
+    run.add_argument("--session", help="conversation id (letters, digits, dashes) for telemetry")
     args = ap.parse_args(argv)
     if not args.gateway or not args.app_id:
         ap.error("set AGW_GATEWAY_URL and AGW_GATEWAY_APP_ID (or pass --gateway/--app-id)")
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     # because entra.sh pre-authorises the Azure CLI for that scope.
     token = AzureCliCredential().get_token(f"api://{args.app_id}/.default").token
     headers = {"Authorization": f"Bearer {token}"}
+    if getattr(args, "session", None):
+        headers["x-agw-session"] = args.session
     base = args.gateway.rstrip("/") + "/agents"
     with httpx.Client(headers=headers, timeout=300) as http:
         if args.command == "list":

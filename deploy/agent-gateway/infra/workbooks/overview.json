@@ -1,0 +1,247 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "name": "intro",
+      "content": {
+        "json": "## Agent gateway\nToken use, limits and agent activity. Per-user rows come from runtime traces (users are Entra object ids); team, agent and model totals come from APIM token metrics. See also **Agent gateway: run explorer** and **Agent gateway: tools**.\n\nCosts are estimates: tokens times the prices below (USD per 1M tokens; defaults are gpt-5-mini list prices, check your Azure price sheet)."
+      }
+    },
+    {
+      "type": 9,
+      "name": "parameters",
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000007",
+            "version": "KqlParameterItem/1.0",
+            "name": "PriceInput",
+            "label": "Input $/1M",
+            "type": 1,
+            "description": "USD per 1M tokens: check your Azure price sheet",
+            "value": "0.25"
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000008",
+            "version": "KqlParameterItem/1.0",
+            "name": "PriceCached",
+            "label": "Cached input $/1M",
+            "type": 1,
+            "description": "USD per 1M tokens: check your Azure price sheet",
+            "value": "0.025"
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000009",
+            "version": "KqlParameterItem/1.0",
+            "name": "PriceOutput",
+            "label": "Output $/1M",
+            "type": 1,
+            "description": "USD per 1M tokens: check your Azure price sheet",
+            "value": "2.00"
+          }
+        ]
+      }
+    },
+    {
+      "type": 3,
+      "name": "cost-per-user",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let names = AppDependencies\n| where TimeGenerated > ago(90d) and Name startswith \"invoke_agent \" and isnotempty(tostring(Properties[\"agw.user.name\"]))\n| summarize arg_max(TimeGenerated, name = tostring(Properties[\"agw.user.name\"]), upn = tostring(Properties[\"agw.user.upn\"]))\n    by user = tostring(Properties[\"agw.user.id\"])\n| project user, name, upn;\nlet p_in = todouble(\"{PriceInput}\"); let p_cached = todouble(\"{PriceCached}\"); let p_out = todouble(\"{PriceOutput}\");\nAppDependencies\n| where TimeGenerated {TimeRange} and Name startswith \"invoke_agent \"\n| extend user = tostring(Properties[\"agw.user.id\"]), team = tostring(Properties[\"agw.team\"]),\n         cost_center = tostring(Properties[\"agw.cost_center\"]),\n         input = toint(Properties[\"gen_ai.usage.input_tokens\"]), output = toint(Properties[\"gen_ai.usage.output_tokens\"]),\n         cached = coalesce(toint(Properties[\"agw.usage.cached_tokens\"]), 0)\n| summarize runs = count(), input = sum(input), cached = sum(cached), output = sum(output),\n            team = take_any(team), cost_center = take_any(cost_center) by user\n| join kind=leftouter names on user\n| extend who = iff(isempty(name), user, strcat(name, \" (\", upn, \")\")),\n         cost_usd = round(((input - cached) * p_in + cached * p_cached + output * p_out) / 1e6, 4)\n| project who, cost_usd\n| order by cost_usd desc\n| take 25",
+        "size": 0,
+        "title": "Estimated cost per user (USD)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "barchart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "tokens-by-team",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"Prompt Tokens\", \"Completion Tokens\") | summarize tokens = sum(Sum) by team = tostring(Properties[\"Team\"]), bin(TimeGenerated, {TimeRange:grain})",
+        "size": 0,
+        "title": "Tokens by team",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "timechart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "tokens-by-agent",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"Prompt Tokens\", \"Completion Tokens\") | summarize tokens = sum(Sum) by agent = tostring(Properties[\"Agent\"]), model = tostring(Properties[\"Deployment\"]) | order by tokens desc",
+        "size": 0,
+        "title": "Tokens by agent and model",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "barchart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "tokens-by-cost-center",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"Prompt Tokens\", \"Completion Tokens\") | summarize tokens = sum(Sum) by cost_center = tostring(Properties[\"CostCenter\"]), team = tostring(Properties[\"Team\"]) | order by tokens desc",
+        "size": 0,
+        "title": "Tokens by cost center (chargeback)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "barchart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "token-types",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name has \"Tokens\" | summarize tokens = sum(Sum) by Name | where tokens > 0 | order by tokens desc",
+        "size": 0,
+        "title": "Token types (cached and reasoning tokens affect cost)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "blocked",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs | where TimeGenerated {TimeRange} and ResponseCode in (401, 403, 429) | summarize requests = count() by api = ApiId, status = ResponseCode, reason = LastErrorReason, policy = LastErrorSource | order by requests desc",
+        "size": 0,
+        "title": "Refused requests: which policy and why",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "user-cost-table",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let names = AppDependencies\n| where TimeGenerated > ago(90d) and Name startswith \"invoke_agent \" and isnotempty(tostring(Properties[\"agw.user.name\"]))\n| summarize arg_max(TimeGenerated, name = tostring(Properties[\"agw.user.name\"]), upn = tostring(Properties[\"agw.user.upn\"]))\n    by user = tostring(Properties[\"agw.user.id\"])\n| project user, name, upn;\nlet p_in = todouble(\"{PriceInput}\"); let p_cached = todouble(\"{PriceCached}\"); let p_out = todouble(\"{PriceOutput}\");\nAppDependencies\n| where TimeGenerated {TimeRange} and Name startswith \"invoke_agent \"\n| extend user = tostring(Properties[\"agw.user.id\"]), team = tostring(Properties[\"agw.team\"]),\n         cost_center = tostring(Properties[\"agw.cost_center\"]),\n         input = toint(Properties[\"gen_ai.usage.input_tokens\"]), output = toint(Properties[\"gen_ai.usage.output_tokens\"]),\n         cached = coalesce(toint(Properties[\"agw.usage.cached_tokens\"]), 0)\n| summarize runs = count(), input = sum(input), cached = sum(cached), output = sum(output),\n            team = take_any(team), cost_center = take_any(cost_center) by user\n| join kind=leftouter names on user\n| extend who = iff(isempty(name), user, strcat(name, \" (\", upn, \")\")),\n         cost_usd = round(((input - cached) * p_in + cached * p_cached + output * p_out) / 1e6, 4)\n| project who, team, cost_center, runs, input, cached, output, cost_usd\n| order by cost_usd desc",
+        "size": 0,
+        "title": "Cost per user: breakdown",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "users",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let names = AppDependencies\n| where TimeGenerated > ago(90d) and Name startswith \"invoke_agent \" and isnotempty(tostring(Properties[\"agw.user.name\"]))\n| summarize arg_max(TimeGenerated, name = tostring(Properties[\"agw.user.name\"]), upn = tostring(Properties[\"agw.user.upn\"]))\n    by user = tostring(Properties[\"agw.user.id\"])\n| project user, name, upn;\nAppDependencies | where TimeGenerated {TimeRange} and Name startswith \"invoke_agent \" | extend user = tostring(Properties[\"agw.user.id\"]), team = tostring(Properties[\"agw.team\"]), cost_center = tostring(Properties[\"agw.cost_center\"]), tier = tostring(Properties[\"agw.tier\"]), agent = tostring(Properties[\"gen_ai.agent.name\"]), stop = tostring(Properties[\"agw.stop_reason\"]), tokens = toint(Properties[\"gen_ai.usage.input_tokens\"]) + toint(Properties[\"gen_ai.usage.output_tokens\"]) | summarize runs = count(), tokens = sum(tokens), blocked = countif(Success == false), budget_stops = countif(stop == \"budget_exhausted\") by user, team, cost_center, tier, agent | join kind=leftouter names on user | extend who = iff(isempty(name), user, strcat(name, \" (\", upn, \")\")) | project who, team, cost_center, tier, agent, runs, tokens, blocked, budget_stops, user | order by tokens desc",
+        "size": 0,
+        "title": "Users: runs, tokens and blocks",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      }
+    },
+    {
+      "type": 3,
+      "name": "limits-hit",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and Name startswith \"chat \" and Success == false | summarize hits = count() by limit = tostring(Properties[\"agw.limit\"]), bin(TimeGenerated, {TimeRange:grain})",
+        "size": 0,
+        "title": "Limits hit over time",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "timechart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "backend",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs | where TimeGenerated {TimeRange} and ApiId == \"agw-models\" and isnotempty(BackendResponseCode) | summarize calls = count(), throttled = countif(BackendResponseCode == 429), p95_ms = percentile(BackendTime, 95) by bin(TimeGenerated, {TimeRange:grain})",
+        "size": 0,
+        "title": "Model calls, throttling and p95 latency",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "timechart"
+      },
+      "customWidth": "50"
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": []
+}

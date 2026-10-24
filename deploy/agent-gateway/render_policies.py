@@ -32,7 +32,14 @@ from typing import Annotated
 from xml.sax.saxutils import escape
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 # Names end up inside C# string literals in the policy, so they are restricted to a
 # safe alphabet rather than escaped.
@@ -44,11 +51,21 @@ GroupId = Annotated[
     ),
 ]
 Tokens = Annotated[int, Field(gt=0)]
+CostCenter = Annotated[str, StringConstraints(pattern=r"^[0-9]{1,12}$")]
 
 USER_SCOPE = "Agents.Invoke"  # delegated scope users' tokens must carry
 INTERNAL_ROLE = "Gateway.Internal"  # app role held by the APIM and runtime identities
 Q = '"'  # a C# double quote, for building expressions
-CONTEXT_HEADERS = ("x-agw-user", "x-agw-tier", "x-agw-team", "x-agw-agent", "x-agw-run")
+CONTEXT_HEADERS = (
+    "x-agw-user",
+    "x-agw-tier",
+    "x-agw-team",
+    "x-agw-agent",
+    "x-agw-run",
+    "x-agw-session",
+)
+# A client-chosen conversation id is kept only if it looks like one.
+SESSION_PATTERN = "^[A-Za-z0-9-]{1,64}$"
 
 
 class _Model(BaseModel):
@@ -69,16 +86,26 @@ class Tier(_Model):
         return self
 
 
+def _digits(value: object) -> object:
+    """Cost centres are numbers; YAML may give an int."""
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+
+
 class Team(_Model):
     name: Name
     group_id: GroupId
     tokens_per_month: Tokens
-    cost_center: str | None = None
+    cost_center: CostCenter = Field(description="Numeric cost centre for chargeback")
+
+    _cc = field_validator("cost_center", mode="before")(_digits)
 
 
 class DefaultTeam(_Model):
     name: Name
     tokens_per_month: Tokens
+    cost_center: CostCenter | None = None
+
+    _cc = field_validator("cost_center", mode="before")(_digits)
 
 
 class Agent(_Model):
@@ -254,6 +281,47 @@ def _policies(inbound: list[str], outbound: list[str]) -> str:
     return "<policies>\n" + _indent("\n".join(sections), 2) + "\n</policies>\n"
 
 
+def _cost_center_code(cfg: GatewayConfig, team_expr: str) -> str:
+    """C# block body: the cost centre of a team name ("" if none)."""
+    pairs = [(t.name, t.cost_center) for t in cfg.teams]
+    if cfg.default_team.cost_center:
+        pairs.append((cfg.default_team.name, cfg.default_team.cost_center))
+    return (
+        f"var t = {team_expr}; "
+        + " ".join(f'if (t == "{name}") {{ return "{cc}"; }}' for name, cc in pairs)
+        + ' return "";'
+    )
+
+
+def _whoami_code(cfg: GatewayConfig, claims: str) -> str:
+    """C# block body: the caller's gateway profile as JSON (answered by APIM for GET /me)."""
+    tier, team = _var("agw-tier"), _var("agw-team")
+    limits = " ".join(
+        f'if (tier == "{t.name}") {{ limits = new JObject(new JProperty("tokensPerMinute", {t.tokens_per_minute}), '
+        f'new JProperty("tokensPerDay", {t.tokens_per_day}), new JProperty("tokensPerMonth", {t.tokens_per_month})); }}'
+        for t in cfg.tiers
+    )
+    pools = [(t.name, t.tokens_per_month) for t in cfg.teams]
+    pools.append((cfg.default_team.name, cfg.default_team.tokens_per_month))
+    pool = " ".join(f'if (team == "{name}") {{ pool = {tokens}; }}' for name, tokens in pools)
+    claim = lambda name: f"{claims}.GetValueOrDefault({Q}{name}{Q}, {Q}{Q})"  # noqa: E731
+    return (
+        f"var tier = {tier}; var team = {team}; var limits = new JObject(); long pool = 0; "
+        f"{limits} {pool} "
+        f'var agents = new JArray({_var("agw-allowed")}.Split(new[] {{ "," }}, StringSplitOptions.RemoveEmptyEntries)); '
+        "return new JObject("
+        'new JProperty("user", new JObject('
+        f'new JProperty("id", {_var("agw-user")}), new JProperty("name", {claim("name")}), '
+        f'new JProperty("upn", {claim("preferred_username")}))), '
+        'new JProperty("tier", tier), new JProperty("team", team), '
+        f'new JProperty("costCenter", {_var("agw-cost-center")}), '
+        'new JProperty("agents", agents), '
+        'new JProperty("limits", new JObject(new JProperty("user", limits), '
+        f'new JProperty("teamTokensPerMonth", pool), new JProperty("runsPerMinute", {cfg.runs_per_minute})))'
+        ").ToString();"
+    )
+
+
 # ----- the front door: users -> agent runtime ---------------------------------------------------
 
 
@@ -290,7 +358,9 @@ def render_agents_api(cfg: GatewayConfig) -> str:
         f'<set-variable name="agw-tier" value={_block(tier_code)} />',
         f'<set-variable name="agw-team" value={_block(team_code)} />',
         f'<set-variable name="agw-allowed" value={_block(allowed_code)} />',
+        f'<set-variable name="agw-cost-center" value={_block(_cost_center_code(cfg, _var("agw-team")))} />',
         f'<set-variable name="agw-agent" value={_expr("context.Request.MatchedParameters.GetValueOrDefault(" + Q + "agent" + Q + ", " + Q + Q + ")")} />',
+        f'<set-variable name="agw-session" value={_block("var s = context.Request.Headers.GetValueOrDefault(" + Q + "x-agw-session" + Q + ", " + Q + Q + "); return System.Text.RegularExpressions.Regex.IsMatch(s, " + Q + SESSION_PATTERN + Q + ") ? s : context.RequestId.ToString();")} />',
         _choose(
             [
                 _when(
@@ -313,12 +383,37 @@ def render_agents_api(cfg: GatewayConfig) -> str:
         f'<rate-limit-by-key calls="{cfg.runs_per_minute}" renewal-period="60"\n'
         f"    counter-key={_expr(Q + 'runs:' + Q + ' + ' + _var('agw-user'))}\n"
         f"    increment-condition={_expr('context.Request.Method == ' + Q + 'POST' + Q)} />",
+        # GET /agents/me: APIM answers from what it just derived; the runtime isn't called.
+        _choose(
+            [
+                _when(
+                    _expr("context.Operation.Id == " + Q + "whoami" + Q),
+                    "<return-response>\n"
+                    '  <set-status code="200" reason="OK" />\n'
+                    '  <set-header name="Content-Type" exists-action="override">\n'
+                    "    <value>application/json</value>\n"
+                    "  </set-header>\n"
+                    f"  <set-body>{escape('@{ ' + _whoami_code(cfg, claims) + ' }')}</set-body>\n"
+                    "</return-response>",
+                )
+            ]
+        ),
         # Overwrite anything the caller sent: only the gateway sets context headers.
         _set_header("x-agw-user", _var("agw-user")),
         _set_header("x-agw-tier", _var("agw-tier")),
         _set_header("x-agw-team", _var("agw-team")),
         _set_header("x-agw-allowed-agents", _var("agw-allowed")),
+        _set_header("x-agw-cost-center", _var("agw-cost-center")),
+        # Who the user is, for reports (from the validated token; never trusted for limits).
+        _set_header(
+            "x-agw-user-name", claims + ".GetValueOrDefault(" + Q + "name" + Q + ", " + Q + Q + ")"
+        ),
+        _set_header(
+            "x-agw-user-upn",
+            claims + ".GetValueOrDefault(" + Q + "preferred_username" + Q + ", " + Q + Q + ")",
+        ),
         _set_header("x-agw-run", "context.RequestId.ToString()"),
+        _set_header("x-agw-session", _var("agw-session")),
         '<set-backend-service backend-id="agw-runtime" />',
         # Replaces the user's token: the runtime only accepts the gateway's identity.
         '<authentication-managed-identity resource="api://{{agw-gateway-app-id}}" client-id="{{agw-apim-client-id}}" />',
@@ -448,9 +543,11 @@ def render_models_api(cfg: GatewayConfig) -> str:
         'new JProperty("time", DateTime.UtcNow.ToString("o")), '
         'new JProperty("requestId", context.RequestId.ToString()), '
         f'new JProperty("runId", {run}), '
+        f'new JProperty("sessionId", {_var("agw-session")}), '
         f'new JProperty("user", {user}), '
         f'new JProperty("tier", {tier}), '
         f'new JProperty("team", {team}), '
+        f'new JProperty("costCenter", {_var("agw-cost-center")}), '
         f'new JProperty("agent", {agent}), '
         f'new JProperty("deployment", {model}), '
         'new JProperty("status", context.Response.StatusCode), '
@@ -468,6 +565,9 @@ def render_models_api(cfg: GatewayConfig) -> str:
         header_var("agw-team", "x-agw-team"),
         header_var("agw-agent", "x-agw-agent"),
         header_var("agw-run", "x-agw-run"),
+        header_var("agw-session", "x-agw-session"),
+        # Derived from the team here rather than trusted from a header.
+        f'<set-variable name="agw-cost-center" value={_block(_cost_center_code(cfg, team))} />',
         f'<set-variable name="agw-model" value={_block("var b = context.Request.Body == null ? null : context.Request.Body.As<JObject>(preserveContent: true); return b == null ? " + q + q + " : (b.Value<string>(" + q + "model" + q + ") ?? " + q + q + ");")} />',
         f'<set-variable name="agw-stream" value={_block("var b = context.Request.Body == null ? null : context.Request.Body.As<JObject>(preserveContent: true); return b != null && (b.Value<bool?>(" + q + "stream" + q + ") ?? false);")} />',
         _choose(
@@ -513,6 +613,7 @@ def render_models_api(cfg: GatewayConfig) -> str:
         f'  <dimension name="Team" value={_expr(team)} />\n'
         f'  <dimension name="Agent" value={_expr(agent)} />\n'
         f'  <dimension name="Deployment" value={_expr(model)} />\n'
+        f'  <dimension name="CostCenter" value={_expr(_var("agw-cost-center"))} />\n'
         "</llm-emit-token-metric>",
         *(_set_header(h, delete=True) for h in CONTEXT_HEADERS),
         '<set-backend-service backend-id="agw-models" />',

@@ -51,6 +51,9 @@ class ChatRequest(BaseModel):
     agent: str = Field(pattern=NAME)
     input: Text
     history: list[Turn] = Field(default=[], max_length=40)
+    session_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9-]{1,64}$", description="Conversation id for telemetry"
+    )
 
 
 class Settings(BaseModel):
@@ -121,14 +124,16 @@ def create_app(
         token = header[7:].strip()
         return token, validator.validate(token)
 
-    def gateway(method: str, path: str, token: str, body: Any = None) -> JSONResponse:
+    def gateway(
+        method: str, path: str, token: str, body: Any = None, session: str | None = None
+    ) -> JSONResponse:
         obo_token = obo.token_for(token)
+        headers = {"Authorization": f"Bearer {obo_token}", **_trace_headers()}
+        if session:
+            headers["x-agw-session"] = session
         try:
             res = client.request(
-                method,
-                f"{cfg.gateway_url}/agents{path}",
-                json=body,
-                headers={"Authorization": f"Bearer {obo_token}", **_trace_headers()},
+                method, f"{cfg.gateway_url}/agents{path}", json=body, headers=headers
             )
         except httpx.HTTPError as exc:
             return _error(502, "gateway_unreachable", str(exc))
@@ -175,7 +180,15 @@ def create_app(
     @app.get("/api/whoami")
     def whoami(request: Request) -> dict[str, Any]:
         token, claims = user_token(request)
-        gateway_claims = peek_claims(obo.token_for(token))
+        obo_token = obo.token_for(token)
+        gateway_claims = peek_claims(obo_token)
+        try:  # what the gateway derived from the token: tier, team, cost center, limits
+            res = client.get(
+                f"{cfg.gateway_url}/agents/me", headers={"Authorization": f"Bearer {obo_token}"}
+            )
+            gateway_view: Any = res.json() if res.status_code == 200 else {"error": res.status_code}
+        except (httpx.HTTPError, ValueError) as exc:
+            gateway_view = {"error": str(exc)}
 
         def pick(c: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -191,6 +204,7 @@ def create_app(
             "name": claims.get("name") or claims.get("preferred_username"),
             "token_for_chat_app": pick(claims),
             "obo_token_for_gateway": pick(gateway_claims),
+            "gateway_view": gateway_view,
         }
 
     @app.get("/api/agents")
@@ -206,6 +220,7 @@ def create_app(
             f"/{body.agent}/runs",
             token,
             {"input": body.input, "history": [t.model_dump() for t in body.history]},
+            session=body.session_id,
         )
 
     return app

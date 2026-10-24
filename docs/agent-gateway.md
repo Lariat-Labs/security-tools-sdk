@@ -39,7 +39,9 @@ These came out of the discovery questions:
 | Quota assignment | Tiers by Entra group (`sg-agents-standard`, `sg-agents-power`, …) |
 | Agent access | One Entra group per agent (`sg-agent-cve-triage`, …) |
 | Clients | Teams / M365 Copilot (bot SSO + on-behalf-of) and API / SDK / CLI |
-| Visibility | Usage dashboards, cost chargeback, metadata-only audit trail, alerts |
+| Visibility | Usage dashboards, cost chargeback, audit trail, alerts; session and tool-call explorer |
+| Captured content | User input and tool arguments (sensitive arguments redacted), kept 30 days; no model output or tool results |
+| Chargeback unit | Numeric cost center per team group, stamped on every request |
 | Network | APIM Standard v2, public endpoint with Entra authentication |
 
 ## Why not Foundry's built-in options
@@ -217,23 +219,53 @@ sequenceDiagram
 - The page keeps the conversation and sends earlier turns as `history`; the backend and
   runtime keep no state.
 
-**Teams and M365 Copilot.** A bot (Azure Bot Service, Microsoft 365 Agents SDK) fronts
-the gateway, not the runtime:
+**Teams.** [`teams/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/teams)
+is a bot on the Microsoft 365 Agents SDK (Python, 1.8). It is the same middle tier as the web
+chat, with Teams SSO in front:
 
-1. Teams SSO gives the bot a token for the **bot's** app registration on behalf of the user.
-2. The bot exchanges it with the **on-behalf-of** flow (MSAL `acquire_token_on_behalf_of`)
-   for `api://<gateway-app-id>/Agents.Invoke`. The bot's app needs that delegated
-   permission with admin consent.
-3. The bot calls `/agents/...` with that token. APIM sees the real user and groups, so
-   limits and entitlements are the same as on the CLI.
-4. The runtime is stateless, so the bot keeps conversation history (for example in Cosmos
-   DB keyed by conversation id) and sends earlier turns as `history`.
-5. Runs can take longer than a bot should wait before replying. Send a typing indicator
-   or "working on it" message, then post the answer as a proactive message.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User in Teams
+    participant T as Teams + Azure Bot
+    participant B as Bot (Container Apps)
+    participant E as Microsoft Entra ID
+    participant G as APIM /agents
+    U->>T: message
+    T->>B: activity (Bot Service token)
+    B->>T: need a token (OAuth connection "teams-sso")
+    T->>E: Teams SSO, silent: token for api://botid-<app>
+    T-->>B: user token (via the Bot token store)
+    B->>E: on-behalf-of → api://<gateway>/.default
+    E-->>B: gateway token as the user
+    B-->>U: "Working on it…"
+    B->>G: POST /agents/{agent}/runs (OBO token, x-agw-session)
+    G-->>B: answer, usage
+    B-->>U: answer (proactive message)
+```
 
-The bot itself is not in this repository yet (see [open items](#risks-and-open-items)).
-It will reuse the chat backend's `auth.py` (token validation and OBO) unchanged; only the
-front end changes. It needs a tenant with Teams licences to sideload the app.
+- **No secrets anywhere.** One app registration is both the bot's identity and its SSO
+  app (`api://botid-<app-id>`, scope `defaultScopes`, Teams clients pre-authorised). It has
+  two federated identity credentials:
+  - one for the **Azure Bot token store**, so the OAuth connection uses the *AAD v2 with
+    Federated Credentials* provider;
+  - one for the **bot's managed identity**, so the bot authenticates to Bot Service and
+    performs OBO with `AuthType=FederatedCredentials`.
+- **Long runs.** The bot replies "Working on it…" at once and posts the answer later as a
+  proactive message, so Teams never waits on the agent.
+- **Commands:** `help`, `agents`, `use <agent>`, `me` (tier, team, cost center, limits),
+  `new`, `signout`. Anything else is a question for the current agent.
+- **State.** Conversation history and the chosen agent live in memory, one replica. For
+  more replicas, store them in Cosmos DB keyed by conversation id. Each conversation has a
+  session id (`teams-…`) for the run explorer.
+- **App package.** `teams/package.py` builds the manifest (with `webApplicationInfo` for SSO)
+  and icons into a zip to upload in Teams or the Teams admin center.
+
+**Your gateway profile: `GET /agents/me`.** APIM answers this itself, from the values it
+just derived from the token (the runtime isn't called): user, tier and its token limits,
+team, cost center, team pool and allowed agents. Tier, team and cost center are not in
+the token: they come from your groups and `gateway.yaml`. The web chat shows it in its
+side panel and Teams answers `me` with it.
 
 ## Limits
 
@@ -339,6 +371,11 @@ uv run python deploy/agent-gateway/render_policies.py my-gateway.yaml
 uv run python deploy/agent-gateway/render_policies.py my-gateway.yaml --check   # in CI
 ```
 
+Every team has a numeric **cost center**. The front door stamps it on the request (to the
+runtime and its traces); the model route derives it from the team itself (it doesn't trust
+a header) and adds it to every usage event and as a metric dimension, so chargeback can
+group by `costCenter` directly. `default_team` may have one for unassigned usage.
+
 Limits are written into the policy XML as literals because APIM's `tokens-per-minute`
 attribute doesn't accept expressions. Names are restricted to `a-z0-9-` because they end
 up inside C# policy expressions. Environment-specific ids (tenant, app, managed
@@ -361,13 +398,46 @@ Four streams, each with a job, plus a dashboard on top:
 | **Gateway and LLM logs** | Log Analytics (`ApiManagementGatewayLogs`, `ApiManagementGatewayLlmLog`) | Per request: status, latency, backend, token counts | Troubleshooting, `429`/`403` rates, cross-checks |
 | **Runtime traces** (OpenTelemetry via secsdk telemetry) | App Insights | Per run: user, agent, each model call, each tool call and outcome | Audit trail, per-user views, debugging agents |
 
-**Dashboard.** Bicep deploys an Azure Workbook, *Agent gateway* (Azure portal → Monitor →
-Workbooks, or the resource group). It shows tokens by team, agent and model; token types
-(cached and reasoning tokens); refused requests with the policy that refused them; a
-per-user table of runs, tokens and blocks; limits hit over time; model throttling and
-latency; and tool calls. Its definition is
-[`infra/workbook.json`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/infra/workbook.json).
+### Dashboards
+
+Bicep deploys three Azure Workbooks (Azure portal → Monitor → Workbooks, or the resource
+group). They are generated by [`infra/workbooks/build.py`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/infra/workbooks/build.py),
+and `infra/workbooks/validate.py` runs every query against a live workspace before deploy.
+
+| Workbook | What it answers |
+|---|---|
+| **Agent gateway** | Tokens by team, agent, model and cost center; estimated **cost per user** (bar chart and breakdown; prices are parameters, defaulting to gpt-5-mini list prices); token types (cached, reasoning); refused requests and the policy that refused them; users with names; limits hit; model throttling and latency |
+| **Agent gateway: run explorer** | Pick a **session** (one conversation), then a **run**, to see the user's question, every model call (tokens, which tools it asked for) and every tool call with its **arguments**, outcome and timing, plus the upstream API calls the tools made. **Search** finds runs by input or tool argument, e.g. a CVE id or a domain |
+| **Agent gateway: tools** | Per tool: volume, failures, p50/p95 latency; failures by error code; most-queried CVEs; top argument values; slow or failing upstream APIs; search tool calls by argument |
+
 APIM's own **Monitoring → Analytics → Language models** tab adds token charts from the LLM logs.
+The runtime's spans follow the OpenTelemetry GenAI conventions (`invoke_agent`, `chat`,
+`execute_tool`, `gen_ai.conversation.id`, `gen_ai.agent.id`), so App Insights' transaction
+view shows each run as a tree too.
+
+**Foundry trace view.** Bicep creates a Foundry project with this Application Insights
+connected, and `register_agents.py` registers each agent as an **external agent** (preview).
+Foundry matches spans by `gen_ai.agent.id` (the agent name), so each agent's **Traces** tab in
+the Foundry portal shows its runs. Captured content lives in span events (below), so the
+Foundry view shows structure, tokens and latency rather than inputs.
+
+### Sessions and captured content
+
+- **Session.** Clients send `x-agw-session` (the web chat makes one per conversation, the
+  Teams bot one per Teams conversation). The front door keeps it if it matches
+  `^[A-Za-z0-9-]{1,64}$`, otherwise uses the request id. It is on every span
+  (`gen_ai.conversation.id`, `session.id`) and every usage event (`sessionId`).
+- **Content capture** (`AGW_CAPTURE_CONTENT=true`, on in the Bicep): the runtime records the
+  user's input and each tool call's arguments as **span events**. Azure Monitor stores span
+  events in `AppTraces`, which Bicep sets to **30 days**; spans stay at 90. Model answers and
+  tool results are never recorded. Arguments listed in `AGW_REDACT_ARGS` (default
+  `azure.query.query`, the Resource Graph KQL) are replaced with `[redacted]`.
+- **Names.** The front door passes the user's display name and sign-in name from the token;
+  runs record them (`agw.user.name`, `agw.user.upn`) so dashboards show people, not object ids.
+- **Sampling.** `azure-monitor-opentelemetry` defaults to a rate-limited sampler (5 traces
+  per second) that dropped spans in the middle of runs, leaving holes in timelines. The
+  runtime, chat and bot set `OTEL_TRACES_SAMPLER=always_on`. At high volume, weigh the
+  ingestion cost against a complete audit trail.
 
 !!! warning "Why per-user data isn't in metrics"
     Azure Monitor custom metrics allow at most **5 custom dimensions**, and APIM tracks at
@@ -375,14 +445,16 @@ APIM's own **Monitoring → Analytics → Language models** tab adds token chart
     dimension would break that. Per-user numbers come from usage events and runtime traces,
     which are logs and have no cardinality limit.
 
-### Privacy: metadata only
+### Privacy
 
-- No prompt or completion text is stored anywhere. Bicep turns on APIM's LLM logs (token
-  counts per call) but not the separate *Log prompts* / *Log completions* options;
-  the runtime's spans record operation names, outcomes and token counts, not content.
-  secsdk's telemetry records parameter **names** only, unless `SECSDK_TELEMETRY_CAPTURE_PARAMS=true`.
-- Users are identified by Entra **object id** (`oid`), not name or email. Resolve names
-  only in reports, from Microsoft Graph.
+- **Model output is never stored.** Bicep turns on APIM's LLM logs (token counts per call)
+  but not the separate *Log prompts* / *Log completions* options. The runtime's spans
+  record operation names, outcomes and token counts; user input and tool arguments are
+  span events with 30-day retention (above). secsdk's own spans record parameter **names**
+  only, unless `SECSDK_TELEMETRY_CAPTURE_PARAMS=true`.
+- **People** are identified by Entra object id everywhere, and by display and sign-in
+  name on runs (for dashboards). Turn names off by removing the two `x-agw-user-name` /
+  `x-agw-user-upn` headers from the front-door policy.
 - Usage events and traces are personal data under most policies. Set Log Analytics and
   lake retention to match your policy, and restrict access to the usage table.
 
@@ -484,6 +556,17 @@ docker build --platform linux/amd64 -t <registryLoginServer>/agw-chat:0.1.0 -f c
 docker push <registryLoginServer>/agw-chat:0.1.0
 az deployment group create … -p chatAppId=<chatAppId> chatImage=<registryLoginServer>/agw-chat:0.1.0
 ./entra.sh chat-link <chatAppId> <chatUrl> <chatPrincipalId>   # outputs of the deployment
+
+# 8. Teams bot: app registration (trusts the bot identity and the Bot token store), image,
+#    deploy, then build the app package and upload it in Teams
+./entra.sh teams <app-id> <botPrincipalId>        # prints teamsAppId
+docker build --platform linux/amd64 -t <registryLoginServer>/agw-teams:0.2.0 -f teams/Dockerfile ../..
+docker push <registryLoginServer>/agw-teams:0.2.0
+az deployment group create … -p teamsAppId=<teamsAppId> teamsImage=<registryLoginServer>/agw-teams:0.2.0
+uv run python teams/package.py --app-id <teamsAppId> --bot-host <teamsBotEndpoint host>
+
+# 9. Foundry trace view: register the agents as external agents
+uv run python register_agents.py --endpoint <foundryProjectEndpoint>
 ```
 
 The image build context is the repo root, and `.dockerignore` is an allow-list
@@ -542,6 +625,14 @@ APIM Standard v2, `gpt-5-mini` (GlobalStandard, 500K TPM), the runtime on Contai
 | Gateway logs name the refusing policy (`OpenAITokenQuotaExceeded`, `llm-token-limit[1]`) | ✅ |
 | Web chat: OBO with a managed-identity federated credential (no secret) | ✅ gateway token has `aud` = gateway, `azp` = chat app, same `oid`, 3 groups |
 | Web chat: agent run through chat → OBO → gateway → runtime → model + tools | ✅ 3 model calls, 4 tool calls, ~17 s |
+| Session id from the chat through APIM to every span and usage event | ✅ |
+| Run explorer: input → model calls → tool calls with arguments | ✅ all 21 workbook queries validated against live data |
+| Complete runs (every model-call span present) | ✅ after `always_on` sampling; ❌ before (default sampler dropped spans) |
+| Cost center on requests, usage events, metrics and runs | ✅ |
+| Cost per user with names and cached-token split | ✅ |
+| `GET /agents/me` directly and through chat OBO | ✅ tier, team, cost center, limits, agents |
+| Foundry external agents registered; project with App Insights connected | ✅ |
+| Teams bot deployed: Azure Bot, Teams channel, federated SSO connection, health | ✅ (Teams sign-in not yet tested: needs a licensed user) |
 
 Fixes found by the pilot (already in the code): the CLI client asks for `/.default`
 (the Azure CLI credential rejects named scopes); Bicep takes environment-specific policy
@@ -555,8 +646,8 @@ agent quotas at their limits, and a 20-run load test.
 - **Burst overshoot:** per-minute limits overshoot under concurrent load (see the pilot).
   If a hard per-minute ceiling matters, add a request-count `rate-limit-by-key` per user on
   the model route, or cap concurrent runs per user at the front door.
-- **Teams bot** is designed here but not built; the web chat proves the same OBO path.
-  It needs a Teams-licensed tenant (the pilot tenant has no Microsoft 365 licences).
+- **Teams sign-in** is deployed but untested end to end: the pilot tenant has no Microsoft 365
+  licences yet. The web chat proves the same OBO path.
 - **Conversation state** is the client's job (the runtime is stateless). A shared
   conversation store would need per-user isolation.
 - **Foundry Agent Service** may later support end-user identity on model calls; if it does,

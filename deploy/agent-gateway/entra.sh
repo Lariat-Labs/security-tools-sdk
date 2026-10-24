@@ -8,6 +8,8 @@
 #   ./entra.sh chat <gateway-app-id>       create the "agent-gateway-chat" app (web chat, OBO)
 #   ./entra.sh chat-link <chat-app-id> <chat-url> <chat-mi-principal-id>
 #                                          add the redirect URI and trust the chat's managed identity
+#   ./entra.sh teams <gateway-app-id> <bot-mi-principal-id>
+#                                          create the "agent-gateway-teams" bot app (Teams SSO, OBO)
 #
 # Needs: az login as an Application Administrator (or Cloud Application Administrator).
 # Assigning groups to an application needs Microsoft Entra ID P1 or P2.
@@ -162,11 +164,57 @@ JSON
   echo "Redirect URI $url/ added; managed identity $principal trusted as the client credential."
 }
 
+cmd_teams() {
+  # One app registration is the bot's identity AND its Teams SSO app (api://botid-<appId>).
+  # No secrets: two federated credentials let (1) the Azure Bot token store run the OAuth
+  # connection and (2) the bot's managed identity authenticate as the app and do OBO.
+  local gateway_app="$1" bot_mi="$2" app obj scope_id gateway_scope tenant tenant_b64 unique
+  unique="${AGW_TEAMS_SSO_ID:-agw-teams-sso}"
+  tenant=$(az account show --query tenantId -o tsv)
+  # Base64url of the tenant GUID in .NET byte order, as the Bot token store presents it.
+  tenant_b64=$(python3 -c "import uuid,base64,sys; print(base64.urlsafe_b64encode(uuid.UUID(sys.argv[1]).bytes_le).decode().rstrip('='))" "$tenant")
+  gateway_scope=$(az ad app show --id "$gateway_app" --query "api.oauth2PermissionScopes[?value=='Agents.Invoke'].id | [0]" -o tsv)
+  app=$(az ad app create --display-name "${AGW_TEAMS_APP_NAME:-agent-gateway-teams}" --sign-in-audience AzureADMyOrg \
+        --web-redirect-uris "https://token.botframework.com/.auth/web/redirect" --query appId -o tsv)
+  obj=$(az ad app show --id "$app" --query id -o tsv)
+  scope_id=$(new_id)
+  teams_api() { # $1 = include Teams client pre-authorisation
+    local pre="[]"
+    if [[ "$1" == "true" ]]; then
+      pre="[{\"appId\": \"1fec8e78-bce4-4aaf-ab1b-5451cc387264\", \"delegatedPermissionIds\": [\"$scope_id\"]},
+            {\"appId\": \"5e3ce6c0-2b1f-4285-8d4b-75ee78787346\", \"delegatedPermissionIds\": [\"$scope_id\"]}]"
+    fi
+    echo "{\"requestedAccessTokenVersion\": 2, \"oauth2PermissionScopes\": [{\"id\": \"$scope_id\", \"value\": \"defaultScopes\", \"type\": \"User\", \"isEnabled\": true,
+      \"adminConsentDisplayName\": \"Use the agent gateway bot\", \"adminConsentDescription\": \"Use the agent gateway bot as the signed-in user.\",
+      \"userConsentDisplayName\": \"Use the agent gateway bot\", \"userConsentDescription\": \"Use the agent gateway bot as you.\"}],
+      \"preAuthorizedApplications\": $pre}"
+  }
+  az rest --method PATCH --url "$GRAPH/applications/$obj" --headers Content-Type=application/json \
+    --body "{\"identifierUris\": [\"api://botid-$app\"], \"api\": $(teams_api false)}"
+  # Teams desktop/mobile and web may get SSO tokens without a consent prompt.
+  az rest --method PATCH --url "$GRAPH/applications/$obj" --headers Content-Type=application/json \
+    --body "{\"api\": $(teams_api true), \"requiredResourceAccess\": [
+      {\"resourceAppId\": \"$gateway_app\", \"resourceAccess\": [{\"id\": \"$gateway_scope\", \"type\": \"Scope\"}]},
+      {\"resourceAppId\": \"$app\", \"resourceAccess\": [{\"id\": \"$scope_id\", \"type\": \"Scope\"}]}]}"
+  az ad sp create --id "$app" -o none
+  az ad app permission grant --id "$app" --api "$gateway_app" --scope Agents.Invoke -o none
+  az ad app permission grant --id "$app" --api "$app" --scope defaultScopes -o none
+  for fic in \
+    "{\"name\": \"bot-token-store\", \"issuer\": \"https://login.microsoftonline.com/$tenant/v2.0\", \"subject\": \"/eid1/c/pub/t/$tenant_b64/a/9ExAW52n_ky4ZiS_jhpJIQ/$unique\", \"audiences\": [\"api://AzureADTokenExchange\"], \"description\": \"Azure Bot OAuth connection (AAD v2 with Federated Credentials)\"}" \
+    "{\"name\": \"bot-managed-identity\", \"issuer\": \"https://login.microsoftonline.com/$tenant/v2.0\", \"subject\": \"$bot_mi\", \"audiences\": [\"api://AzureADTokenExchange\"], \"description\": \"The bot's managed identity is this app's credential\"}"; do
+    az rest --method POST --url "$GRAPH/applications/$obj/federatedIdentityCredentials" \
+      --headers Content-Type=application/json --body "$fic" -o none
+  done
+  echo "teamsAppId=$app"
+  echo "teamsSsoUniqueId=$unique"
+}
+
 case "${1:-}" in
   app) cmd_app ;;
   group) [[ $# -eq 3 ]] || { echo "usage: $0 group <app-id> <group-name>" >&2; exit 2; }; cmd_group "$2" "$3" ;;
   grant) [[ $# -ge 3 ]] || { echo "usage: $0 grant <app-id> <principal-id>..." >&2; exit 2; }; shift; cmd_grant "$@" ;;
   chat) [[ $# -eq 2 ]] || { echo "usage: $0 chat <gateway-app-id>" >&2; exit 2; }; cmd_chat "$2" ;;
   chat-link) [[ $# -eq 4 ]] || { echo "usage: $0 chat-link <chat-app-id> <chat-url> <chat-mi-principal-id>" >&2; exit 2; }; cmd_chat_link "$2" "$3" "$4" ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  teams) [[ $# -eq 3 ]] || { echo "usage: $0 teams <gateway-app-id> <bot-mi-principal-id>" >&2; exit 2; }; cmd_teams "$2" "$3" ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
 esac

@@ -22,6 +22,8 @@
     <set-variable name="agw-team" value='@(context.Request.Headers.GetValueOrDefault("x-agw-team", ""))' />
     <set-variable name="agw-agent" value='@(context.Request.Headers.GetValueOrDefault("x-agw-agent", ""))' />
     <set-variable name="agw-run" value='@(context.Request.Headers.GetValueOrDefault("x-agw-run", ""))' />
+    <set-variable name="agw-session" value='@(context.Request.Headers.GetValueOrDefault("x-agw-session", ""))' />
+    <set-variable name="agw-cost-center" value='@{ var t = ((string)context.Variables["agw-team"]); if (t == "secops") { return "1001"; } if (t == "it-ops") { return "1002"; } if (t == "unassigned") { return "9000"; } return ""; }' />
     <set-variable name="agw-model" value='@{ var b = context.Request.Body == null ? null : context.Request.Body.As&lt;JObject&gt;(preserveContent: true); return b == null ? "" : (b.Value&lt;string&gt;("model") ?? ""); }' />
     <set-variable name="agw-stream" value='@{ var b = context.Request.Body == null ? null : context.Request.Body.As&lt;JObject&gt;(preserveContent: true); return b != null &amp;&amp; (b.Value&lt;bool?&gt;("stream") ?? false); }' />
     <choose>
@@ -194,12 +196,14 @@
       <dimension name="Team" value='@(((string)context.Variables["agw-team"]))' />
       <dimension name="Agent" value='@(((string)context.Variables["agw-agent"]))' />
       <dimension name="Deployment" value='@(((string)context.Variables["agw-model"]))' />
+      <dimension name="CostCenter" value='@(((string)context.Variables["agw-cost-center"]))' />
     </llm-emit-token-metric>
     <set-header name="x-agw-user" exists-action="delete" />
     <set-header name="x-agw-tier" exists-action="delete" />
     <set-header name="x-agw-team" exists-action="delete" />
     <set-header name="x-agw-agent" exists-action="delete" />
     <set-header name="x-agw-run" exists-action="delete" />
+    <set-header name="x-agw-session" exists-action="delete" />
     <set-backend-service backend-id="agw-models" />
     <authentication-managed-identity resource="https://cognitiveservices.azure.com" client-id="{{agw-apim-client-id}}" />
   </inbound>
@@ -208,7 +212,7 @@
   </backend>
   <outbound>
     <base />
-    <log-to-eventhub logger-id="agw-usage">@{ var r = context.Response.StatusCode == 200 ? context.Response.Body.As&lt;JObject&gt;(preserveContent: true) : null; var u = r == null ? null : r["usage"] as JObject; var d = u == null ? null : u["prompt_tokens_details"] as JObject; return new JObject(new JProperty("time", DateTime.UtcNow.ToString("o")), new JProperty("requestId", context.RequestId.ToString()), new JProperty("runId", ((string)context.Variables["agw-run"])), new JProperty("user", ((string)context.Variables["agw-user"])), new JProperty("tier", ((string)context.Variables["agw-tier"])), new JProperty("team", ((string)context.Variables["agw-team"])), new JProperty("agent", ((string)context.Variables["agw-agent"])), new JProperty("deployment", ((string)context.Variables["agw-model"])), new JProperty("status", context.Response.StatusCode), new JProperty("promptTokens", u == null ? 0 : (u.Value&lt;int?&gt;("prompt_tokens") ?? 0)), new JProperty("completionTokens", u == null ? 0 : (u.Value&lt;int?&gt;("completion_tokens") ?? 0)), new JProperty("cachedTokens", d == null ? 0 : (d.Value&lt;int?&gt;("cached_tokens") ?? 0)), new JProperty("totalTokens", u == null ? 0 : (u.Value&lt;int?&gt;("total_tokens") ?? 0))).ToString(Newtonsoft.Json.Formatting.None); }</log-to-eventhub>
+    <log-to-eventhub logger-id="agw-usage">@{ var r = context.Response.StatusCode == 200 ? context.Response.Body.As&lt;JObject&gt;(preserveContent: true) : null; var u = r == null ? null : r["usage"] as JObject; var d = u == null ? null : u["prompt_tokens_details"] as JObject; return new JObject(new JProperty("time", DateTime.UtcNow.ToString("o")), new JProperty("requestId", context.RequestId.ToString()), new JProperty("runId", ((string)context.Variables["agw-run"])), new JProperty("sessionId", ((string)context.Variables["agw-session"])), new JProperty("user", ((string)context.Variables["agw-user"])), new JProperty("tier", ((string)context.Variables["agw-tier"])), new JProperty("team", ((string)context.Variables["agw-team"])), new JProperty("costCenter", ((string)context.Variables["agw-cost-center"])), new JProperty("agent", ((string)context.Variables["agw-agent"])), new JProperty("deployment", ((string)context.Variables["agw-model"])), new JProperty("status", context.Response.StatusCode), new JProperty("promptTokens", u == null ? 0 : (u.Value&lt;int?&gt;("prompt_tokens") ?? 0)), new JProperty("completionTokens", u == null ? 0 : (u.Value&lt;int?&gt;("completion_tokens") ?? 0)), new JProperty("cachedTokens", d == null ? 0 : (d.Value&lt;int?&gt;("cached_tokens") ?? 0)), new JProperty("totalTokens", u == null ? 0 : (u.Value&lt;int?&gt;("total_tokens") ?? 0))).ToString(Newtonsoft.Json.Formatting.None); }</log-to-eventhub>
   </outbound>
   <on-error>
     <base />

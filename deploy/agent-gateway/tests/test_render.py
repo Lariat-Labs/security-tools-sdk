@@ -95,8 +95,19 @@ def test_front_door_trusts_only_the_gateway(cfg):
     assert claim.attrib["name"] == "scp" and claim.find("value").text == "Agents.Invoke"
     # Every context header is overwritten, so callers can't spoof them.
     set_headers = {el.attrib["name"]: el.attrib["exists-action"] for el in root.iter("set-header")}
-    for header in ("x-agw-user", "x-agw-tier", "x-agw-team", "x-agw-allowed-agents", "x-agw-run"):
+    for header in (
+        "x-agw-user",
+        "x-agw-tier",
+        "x-agw-team",
+        "x-agw-allowed-agents",
+        "x-agw-run",
+        "x-agw-session",
+    ):
         assert set_headers[header] == "override"
+    assert set_headers["x-agw-user-name"] == "override"  # for reports only
+    assert set_headers["x-agw-user-upn"] == "override"
+    session = next(el for el in root.iter("set-variable") if el.attrib["name"] == "agw-session")
+    assert "Regex.IsMatch" in session.attrib["value"] and "RequestId" in session.attrib["value"]
     auth = root.find(".//authentication-managed-identity")
     assert auth.attrib["client-id"] == "{{agw-apim-client-id}}"
     # The most generous tier is checked first.
@@ -117,9 +128,12 @@ def test_models_api_accepts_only_the_runtime(cfg):
     ]
     assert set(deleted) == set(rp.CONTEXT_HEADERS)  # not forwarded to the model
     dims = [d.attrib["name"] for d in root.iter("dimension")]
-    assert dims == ["Tier", "Team", "Agent", "Deployment"]  # low cardinality only: no user id
+    assert dims == ["Tier", "Team", "Agent", "Deployment", "CostCenter"]  # no user id; max 5
     log = root.find(".//log-to-eventhub")
     assert log.attrib["logger-id"] == "agw-usage" and "promptTokens" in log.text
+    assert "costCenter" in log.text and "sessionId" in log.text
+    cc = next(el for el in root.iter("set-variable") if el.attrib["name"] == "agw-cost-center")
+    assert 'return "1001"' in cc.attrib["value"] and 'return "9000"' in cc.attrib["value"]
 
 
 @pytest.mark.parametrize(
@@ -131,6 +145,8 @@ def test_models_api_accepts_only_the_runtime(cfg):
         (lambda c: c["tiers"][0].update(group_id="not-a-guid"), "group_id"),
         (lambda c: c["tiers"][0].update(tokens_per_day=10), "per-minute <= per-day"),
         (lambda c: c.update(surprise=1), "surprise"),
+        (lambda c: c["teams"][0].update(cost_center="CC-1"), "cost_center"),
+        (lambda c: c["teams"][0].pop("cost_center"), "cost_center"),
     ],
 )
 def test_invalid_configs_are_rejected(raw, mutate, message):
@@ -146,14 +162,50 @@ def test_check_mode_detects_stale_files(tmp_path):
     assert rp.main([str(EXAMPLE), "--out", str(tmp_path), "--check"]) == 1
 
 
-def test_workbook_is_valid_and_queries_the_gateway_tables():
+def test_workbooks_are_valid_and_query_the_gateway_tables():
     import json
 
-    wb = json.loads((GATEWAY_DIR / "infra" / "workbook.json").read_text())
-    assert wb["version"] == "Notebook/1.0"
-    queries = [i["content"]["query"] for i in wb["items"] if i["type"] == 3]
-    assert queries and all("{TimeRange}" in q for q in queries)
-    joined = "\n".join(queries)
-    for table in ("AppMetrics", "AppDependencies", "ApiManagementGatewayLogs"):
+    joined = ""
+    for name in ("overview.json", "run-explorer.json", "tools.json"):
+        wb = json.loads((GATEWAY_DIR / "infra" / "workbooks" / name).read_text())
+        assert wb["version"] == "Notebook/1.0"
+        queries = [i["content"]["query"] for i in wb["items"] if i["type"] == 3]
+        assert queries and all("{TimeRange}" in q for q in queries), name
+        joined += "\n".join(queries)
+    for table in ("AppMetrics", "AppDependencies", "AppTraces", "ApiManagementGatewayLogs"):
         assert table in joined
     assert '"Total Tokens"' not in joined  # APIM emits Prompt/Completion Tokens only
+
+
+def test_numeric_cost_centres_from_yaml_ints(cfg):
+    assert cfg.teams[0].cost_center == "1001"  # YAML int -> digits string
+    front = rp.render_agents_api(cfg)
+    assert 'name="x-agw-cost-center"' in front
+
+
+def test_workbooks_are_current():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "wb_build", GATEWAY_DIR / "infra/workbooks/build.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.main(["--check"]) == 0, "re-run infra/workbooks/build.py"
+
+
+def test_front_door_answers_me_itself(cfg):
+    root = ET.fromstring(rp.render_agents_api(cfg))
+    when = next(w for w in root.iter("when") if "whoami" in w.attrib["condition"])
+    body = when.find("./return-response/set-body").text
+    assert body.startswith("@{") and _balanced(body)
+    for key in (
+        '"tier"',
+        '"team"',
+        '"costCenter"',
+        '"agents"',
+        '"tokensPerDay"',
+        '"teamTokensPerMonth"',
+    ):
+        assert key in body
+    assert "60000" in body and "1500000" in body  # power tier limits from the config

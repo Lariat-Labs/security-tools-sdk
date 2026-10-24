@@ -6,4 +6,5 @@
 !packages/secsdk/src/**
 !deploy/agent-gateway/runtime/**
 !deploy/agent-gateway/chat/**
+!deploy/agent-gateway/teams/agw_teams/**
 **/__pycache__

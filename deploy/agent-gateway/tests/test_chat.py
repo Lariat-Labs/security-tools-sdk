@@ -164,8 +164,14 @@ def test_api_requires_a_valid_token():
     assert c.get("/api/agents", headers=auth(scp="other")).status_code == 403
 
 
+@respx.mock
 def test_whoami_shows_both_tokens_for_the_same_user():
+    me = respx.get(f"{GATEWAY}/agents/me").mock(
+        return_value=httpx.Response(200, json={"tier": "standard", "costCenter": "4100"})
+    )
     body = client().get("/api/whoami", headers=auth()).json()
+    assert body["gateway_view"] == {"tier": "standard", "costCenter": "4100"}
+    assert me.calls[0].request.headers["authorization"].startswith("Bearer ")
     assert body["token_for_chat_app"]["aud"] == CHAT_APP
     assert body["obo_token_for_gateway"]["aud"] == GATEWAY_APP
     assert body["obo_token_for_gateway"]["scp"] == "Agents.Invoke"
@@ -217,3 +223,22 @@ def test_apim_error_shape_is_normalised():
 def test_agent_names_are_validated():
     res = client().post("/api/chat", headers=auth(), json={"agent": "../admin", "input": "hi"})
     assert res.status_code == 422
+
+
+@respx.mock
+def test_chat_forwards_the_session_id():
+    route = respx.post(f"{GATEWAY}/agents/cve-triage/runs").mock(
+        return_value=httpx.Response(200, json={"output": "ok"})
+    )
+    client().post(
+        "/api/chat",
+        headers=auth(),
+        json={"agent": "cve-triage", "input": "hi", "session_id": "s-1"},
+    )
+    assert route.calls[0].request.headers["x-agw-session"] == "s-1"
+    bad = client().post(
+        "/api/chat",
+        headers=auth(),
+        json={"agent": "cve-triage", "input": "hi", "session_id": "a b"},
+    )
+    assert bad.status_code == 422

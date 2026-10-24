@@ -19,6 +19,7 @@ from secsdk.registry import default_registry
 from secsdk.result import Result
 from secsdk.tools import tool_definition
 
+from . import content
 from .agents import AgentDefinition
 
 RETRY_PREFIX = "x-agw-retry-after-"
@@ -176,10 +177,13 @@ class GatewayModelClient:
                 for call in reply.tool_calls
                 if call.type == "function"
             ]
-        usage = completion.usage.model_dump(exclude_none=True) if completion.usage else {}
+        raw_usage = completion.usage.model_dump(exclude_none=True) if completion.usage else {}
+        usage = {k: v for k, v in raw_usage.items() if isinstance(v, int)}
+        details = raw_usage.get("prompt_tokens_details") or {}
+        usage["cached_tokens"] = int(details.get("cached_tokens") or 0)  # billed at a lower rate
         return ModelReply(
             message=message,
-            usage={k: v for k, v in usage.items() if isinstance(v, int)},
+            usage=usage,
             headers=dict(raw.headers),
         )
 
@@ -196,6 +200,14 @@ class UserContext:
     team: str
     run_id: str
     allowed_agents: tuple[str, ...] = ()
+    session: str = ""  # conversation id from the client; defaults to the run id
+    cost_center: str = ""  # from the user's team, set by the gateway
+    user_name: str = ""  # display name, for reports
+    user_upn: str = ""  # sign-in name, for reports
+
+    @property
+    def session_id(self) -> str:
+        return self.session or self.run_id
 
     def headers(self, agent: str) -> dict[str, str]:
         return {
@@ -204,6 +216,18 @@ class UserContext:
             "x-agw-team": self.team,
             "x-agw-agent": agent,
             "x-agw-run": self.run_id,
+            "x-agw-session": self.session_id,
+        }
+
+    def span_attributes(self, agent: str) -> dict[str, Any]:
+        """Correlation attributes on every span of a run (OpenTelemetry GenAI names)."""
+        return {
+            "gen_ai.agent.id": agent,  # Foundry's external-agent trace view matches on this
+            "gen_ai.agent.name": agent,
+            "gen_ai.conversation.id": self.session_id,
+            "session.id": self.session_id,  # fills App Insights' SessionId column
+            "agw.run_id": self.run_id,
+            "agw.user.id": self.user,
         }
 
 
@@ -279,30 +303,42 @@ class AgentRunner:
 
         result = RunResult(run_id=ctx.run_id, agent=agent.name, output="", stop_reason="max_turns")
         usage = result.usage
-        usage.update(prompt_tokens=0, completion_tokens=0, total_tokens=0, model_calls=0)
+        usage.update(
+            prompt_tokens=0, completion_tokens=0, total_tokens=0, cached_tokens=0, model_calls=0
+        )
         next_prompt_estimate = 0
 
         with _span(
             f"invoke_agent {agent.name}",
             **{
                 "gen_ai.operation.name": "invoke_agent",
-                "gen_ai.agent.name": agent.name,
                 "gen_ai.request.model": agent.deployment,
-                "agw.user.id": ctx.user,
                 "agw.tier": ctx.tier,
                 "agw.team": ctx.team,
-                "agw.run_id": ctx.run_id,
+                "agw.cost_center": ctx.cost_center or None,
+                "agw.user.name": ctx.user_name or None,
+                "agw.user.upn": ctx.user_upn or None,
+                **ctx.span_attributes(agent.name),
             },
         ) as run_span:
-            for _turn in range(agent.max_turns):
+            if run_span is not None and content.capture_enabled():
+                run_span.add_event(
+                    "agw.user_input",
+                    {
+                        "agw.input": content.truncate(user_input),
+                        "agw.history_turns": len(history or []),
+                        **ctx.span_attributes(agent.name),
+                    },
+                )
+            for turn in range(agent.max_turns):
                 remaining = agent.budget_tokens - usage["total_tokens"]
                 if usage["model_calls"] and next_prompt_estimate + 256 > remaining:
                     result.stop_reason = "budget_exhausted"
                     break
                 max_out = min(agent.max_output_tokens, max(256, remaining - next_prompt_estimate))
-                reply = self._complete(agent, ctx, messages, tools, max_out)
+                reply = self._complete(agent, ctx, messages, tools, max_out, turn)
 
-                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens"):
                     usage[key] += reply.usage.get(key, 0)
                 usage["model_calls"] += 1
                 result.limits.update(_remaining(reply.headers))
@@ -318,12 +354,10 @@ class AgentRunner:
 
                 added = 0
                 for call in calls:
-                    content, record = self._run_tool(agent, tools_by_name, call)
+                    text, record = self._run_tool(agent, ctx, tools_by_name, call, turn)
                     result.tool_calls.append(record)
-                    messages.append(
-                        {"role": "tool", "tool_call_id": call["id"], "content": content}
-                    )
-                    added += len(content)
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
+                    added += len(text)
                 next_prompt_estimate = (
                     reply.usage.get("prompt_tokens", 0)
                     + reply.usage.get("completion_tokens", 0)
@@ -340,6 +374,7 @@ class AgentRunner:
                 **{
                     "gen_ai.usage.input_tokens": usage["prompt_tokens"],
                     "gen_ai.usage.output_tokens": usage["completion_tokens"],
+                    "agw.usage.cached_tokens": usage["cached_tokens"],
                     "agw.stop_reason": result.stop_reason,
                     "agw.tool_calls": len(result.tool_calls),
                 },
@@ -353,6 +388,7 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         max_out: int,
+        turn: int = 0,
     ) -> ModelReply:
         waited = False
         while True:
@@ -362,6 +398,8 @@ class AgentRunner:
                     "gen_ai.operation.name": "chat",
                     "gen_ai.request.model": agent.deployment,
                     "gen_ai.request.max_tokens": max_out,
+                    "agw.turn": turn,
+                    **ctx.span_attributes(agent.name),
                 },
             ) as span:
                 try:
@@ -390,20 +428,53 @@ class AgentRunner:
                     **{
                         "gen_ai.usage.input_tokens": reply.usage.get("prompt_tokens"),
                         "gen_ai.usage.output_tokens": reply.usage.get("completion_tokens"),
+                        "agw.usage.cached_tokens": reply.usage.get("cached_tokens"),
+                        # Tool names the model asked for (names only; arguments are content).
+                        "agw.tools_requested": ",".join(
+                            c.get("function", {}).get("name", "")
+                            for c in reply.message.get("tool_calls") or []
+                        )
+                        or None,
                     },
                 )
                 return reply
 
     def _run_tool(
-        self, agent: AgentDefinition, tools_by_name: dict[str, str], call: dict[str, Any]
+        self,
+        agent: AgentDefinition,
+        ctx: UserContext,
+        tools_by_name: dict[str, str],
+        call: dict[str, Any],
+        turn: int = 0,
     ) -> tuple[str, ToolCallRecord]:
         name = call.get("function", {}).get("name", "")
+        raw_args = call.get("function", {}).get("arguments") or "{}"
         operation = tools_by_name.get(name)
         started = time.monotonic()
         with _span(
             f"execute_tool {name}",
-            **{"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name},
+            **{
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": name,
+                "gen_ai.tool.type": "function",
+                "gen_ai.tool.call.id": call.get("id"),
+                "secsdk.operation": operation,
+                "agw.turn": turn,
+                **ctx.span_attributes(agent.name),
+            },
         ) as span:
+            if span is not None and content.capture_enabled():
+                span.add_event(
+                    "agw.tool_arguments",
+                    {
+                        "gen_ai.tool.name": name,
+                        "gen_ai.tool.call.id": call.get("id") or "",
+                        "gen_ai.tool.call.arguments": content.tool_arguments(operation, raw_args),
+                        "secsdk.operation": operation or "",
+                        "agw.turn": turn,
+                        **ctx.span_attributes(agent.name),
+                    },
+                )
             if operation is None:
                 result = Result(
                     ok=False,
@@ -415,7 +486,7 @@ class AgentRunner:
                 )
             else:
                 try:
-                    params = json.loads(call.get("function", {}).get("arguments") or "{}")
+                    params = json.loads(raw_args)
                     if not isinstance(params, dict):
                         raise ValueError("arguments must be a JSON object")
                 except ValueError as exc:
@@ -426,9 +497,16 @@ class AgentRunner:
                     )
                 else:
                     result = self.sdk.execute(operation, params)
-            content = _envelope(result, agent.max_tool_chars)
+            text = _envelope(result, agent.max_tool_chars)
             error_code = None if result.ok else (result.error or {}).get("code")
-            _set(span, **{"secsdk.operation": operation, "error.type": error_code})
+            _set(
+                span,
+                **{
+                    "error.type": error_code,
+                    "agw.tool.outcome": "ok" if result.ok else error_code,
+                    "agw.tool.result_chars": len(text),
+                },
+            )
         record = ToolCallRecord(
             name=name,
             operation=operation,
@@ -436,7 +514,7 @@ class AgentRunner:
             error_code=error_code,
             ms=int((time.monotonic() - started) * 1000),
         )
-        return content, record
+        return text, record
 
 
 def _envelope(result: Result, limit: int) -> str:

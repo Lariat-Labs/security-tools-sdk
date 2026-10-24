@@ -69,6 +69,10 @@ def _context(request: Request) -> UserContext | None:
         team=team,
         run_id=h.get("x-agw-run", ""),
         allowed_agents=allowed,
+        session=h.get("x-agw-session", "")[:64],
+        cost_center=h.get("x-agw-cost-center", "")[:12],
+        user_name=h.get("x-agw-user-name", "")[:200],
+        user_upn=h.get("x-agw-user-upn", "")[:200],
     )
 
 

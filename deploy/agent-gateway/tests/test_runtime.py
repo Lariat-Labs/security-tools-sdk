@@ -123,6 +123,7 @@ def test_run_calls_tools_and_reports_usage_and_limits():
         "prompt_tokens": 200,
         "completion_tokens": 40,
         "total_tokens": 240,
+        "cached_tokens": 0,
         "model_calls": 2,
     }
     assert result.limits == {"user_daily": 299000, "run": 299760}
@@ -136,6 +137,7 @@ def test_run_calls_tools_and_reports_usage_and_limits():
         "x-agw-team": "secops",
         "x-agw-agent": "test-agent",
         "x-agw-run": "run-1",
+        "x-agw-session": "run-1",  # no client session: falls back to the run id
     }
     assert {t["function"]["name"] for t in first["tools"]} == {
         "kev_lookup",
@@ -288,6 +290,7 @@ def test_gateway_model_client_sends_identity_and_context():
     assert seen["agent"] == "cve-triage"
     assert seen["body"]["max_completion_tokens"] == 100 and "stream" not in seen["body"]
     assert out.usage["total_tokens"] == 15
+    assert out.usage["cached_tokens"] == 0  # absent prompt_tokens_details -> 0
     assert out.message["tool_calls"][0]["function"]["name"] == "kev_lookup"
     assert out.headers["x-agw-user-daily-remaining"] == "1000"
 
@@ -389,3 +392,121 @@ def test_api_returns_limit_errors_with_retry_after():
     assert res.headers["retry-after"] == "3600"
     assert res.json()["error"]["code"] == "quota_exceeded"
     assert res.json()["error"]["limit"] == "user"
+
+
+# ----- telemetry: correlation attributes and captured content -----------------------------------
+
+
+@pytest.fixture
+def spans():
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    if not isinstance(trace.get_tracer_provider(), TracerProvider):
+        trace.set_tracer_provider(TracerProvider())
+    exporter = InMemorySpanExporter()
+    trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+    yield exporter
+    exporter.clear()
+
+
+def _run_with_tool(ctx, tool="kev_lookup", args=None, providers=("kev",)):
+    model = FakeModel(
+        reply(calls=[tool_call(tool, args or {"cve_id": "CVE-2023-4966"})]), reply("done")
+    )
+    runner = AgentRunner(model)
+    runner.sdk.execute = lambda op, params: Result(ok=True, operation=op, data={})  # type: ignore[method-assign]
+    runner.run(agent(providers=list(providers)), ctx, "Is CVE-2023-4966 exploited?")
+    return model
+
+
+def _ours(exporter):
+    return [s for s in exporter.get_finished_spans() if s.attributes.get("agw.run_id") == "run-s"]
+
+
+def test_spans_carry_session_and_agent_ids_without_content(spans, monkeypatch):
+    monkeypatch.delenv("AGW_CAPTURE_CONTENT", raising=False)
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s", session="conv-1")
+    model = _run_with_tool(ctx)
+    assert model.calls[0]["headers"]["x-agw-session"] == "conv-1"
+    ours = _ours(spans)
+    names = [s.name for s in ours]
+    assert "invoke_agent test-agent" in names and "execute_tool kev_lookup" in names
+    for s in ours:
+        assert s.attributes["gen_ai.agent.id"] == "test-agent"
+        assert s.attributes["gen_ai.conversation.id"] == "conv-1"
+        assert s.attributes["session.id"] == "conv-1"
+        assert not s.events  # content capture is off by default
+    tool = next(s for s in ours if s.name.startswith("execute_tool"))
+    assert tool.attributes["gen_ai.tool.call.id"] == "call_1"
+    assert tool.attributes["secsdk.operation"] == "kev.lookup"
+    assert tool.attributes["agw.tool.outcome"] == "ok"
+    chat = next(s for s in ours if s.name.startswith("chat ") and s.attributes["agw.turn"] == 0)
+    assert chat.attributes["agw.tools_requested"] == "kev_lookup"
+
+
+def test_content_capture_records_input_and_tool_arguments(spans, monkeypatch):
+    monkeypatch.setenv("AGW_CAPTURE_CONTENT", "true")
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s", session="conv-2")
+    _run_with_tool(ctx)
+    ours = _ours(spans)
+    run = next(s for s in ours if s.name.startswith("invoke_agent"))
+    (event,) = run.events
+    assert event.name == "agw.user_input"
+    assert event.attributes["agw.input"] == "Is CVE-2023-4966 exploited?"
+    assert event.attributes["gen_ai.conversation.id"] == "conv-2"
+    tool = next(s for s in ours if s.name.startswith("execute_tool"))
+    (args,) = tool.events
+    assert args.name == "agw.tool_arguments"
+    assert json.loads(args.attributes["gen_ai.tool.call.arguments"]) == {"cve_id": "CVE-2023-4966"}
+    assert args.attributes["agw.run_id"] == "run-s"
+
+
+def test_sensitive_tool_arguments_are_redacted(spans, monkeypatch):
+    monkeypatch.setenv("AGW_CAPTURE_CONTENT", "true")
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s")
+    _run_with_tool(
+        ctx,
+        tool="azure_query",
+        args={"query": "Resources | where name has 'prod-db'", "limit": 5},
+        providers=("azure",),
+    )
+    tool = next(s for s in _ours(spans) if s.name.startswith("execute_tool"))
+    args = json.loads(tool.events[0].attributes["gen_ai.tool.call.arguments"])
+    assert args == {"query": "[redacted]", "limit": 5}
+
+
+def test_api_passes_session_and_cost_center_through(spans):
+    model = FakeModel(reply("ok"))
+    _app(model).post(
+        "/agents/cve-triage/runs",
+        json={"input": "hi"},
+        headers={**HEADERS, "x-agw-session": "abc-1", "x-agw-cost-center": "1001"},
+    )
+    assert model.calls[0]["headers"]["x-agw-session"] == "abc-1"
+    run = next(
+        s
+        for s in spans.get_finished_spans()
+        if s.attributes.get("agw.run_id") == "run-9" and s.name.startswith("invoke_agent")
+    )
+    assert run.attributes["agw.cost_center"] == "1001"
+
+
+def test_cached_tokens_and_user_names_are_recorded(spans):
+    model = FakeModel(reply("ok", prompt=1000, completion=50))
+    model.replies[0].usage["cached_tokens"] = 600
+    _app(model).post(
+        "/agents/cve-triage/runs",
+        json={"input": "hi"},
+        headers={**HEADERS, "x-agw-user-name": "Ada Lovelace", "x-agw-user-upn": "ada@example.com"},
+    )
+    run = next(
+        s
+        for s in spans.get_finished_spans()
+        if s.attributes.get("agw.run_id") == "run-9" and s.name.startswith("invoke_agent")
+    )
+    assert run.attributes["agw.user.name"] == "Ada Lovelace"
+    assert run.attributes["agw.user.upn"] == "ada@example.com"
+    assert run.attributes["agw.usage.cached_tokens"] == 600
