@@ -1,13 +1,13 @@
 # Agent gateway on Azure: proposal
 
-!!! abstract "Status: proposal, not deployed"
+!!! abstract "Status: proposal, validated in a pilot (24 October 2026)"
     This page is the architecture and design proposal for running secsdk-powered agents
     **as a service** behind Azure API Management (APIM). It covers per-user and per-group
     token limits, entitlements and visibility.
 
     The implementation is in [`deploy/agent-gateway/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway):
-    a policy generator, Bicep, an agent runtime and Entra setup. It is unit-tested offline
-    and the Bicep compiles. Nothing has been deployed to Azure yet; see [Validation plan](#validation-plan).
+    a policy generator, Bicep, an agent runtime, a dashboard and Entra setup. It was
+    deployed end to end to a pilot subscription; see [Pilot results](#pilot-results).
 
 ## Summary
 
@@ -218,8 +218,10 @@ limit hit is the one reported.
 | Team | `t:<team>` | monthly quota | `403` | `x-agw-retry-after-team` |
 
 Successful responses carry `x-agw-*-remaining` headers (user minute, day and month; team
-month; agent day; run). The runtime returns them as `limits` so clients can show
-"you have 1.2M tokens left today".
+month; agent day; run). The runtime returns them as `limits`. They are **estimates** that
+become accurate only near a limit (in the pilot, a counter 5K tokens into a 500K month
+reported 495K left while 80K had really been used). Show them as "about N left" and use
+the usage events for exact figures.
 
 ### Per-run budget: two layers
 
@@ -235,9 +237,16 @@ month; agent day; run). The runtime returns them as `limits` so clients can show
 - **Counts are actual usage.** `estimate-prompt-tokens="false"`, so the limits use the
   `usage` block from each model response. The runtime never streams (the gateway refuses
   `stream: true`), because APIM estimates tokens for streamed calls.
-- **Concurrent calls can overshoot.** A call is counted when its response arrives, so
-  parallel calls can go past a limit before the counter catches up. After that, further
-  calls are blocked. Set limits with that margin in mind.
+- **Per-minute limits are a token bucket that can be overdrawn.** A call is let through
+  whenever any allowance is left and charged when its response arrives, so one large call
+  can take the bucket below zero; the next calls then get `429` until it refills. In the
+  pilot, one run used 11.5K tokens within a minute against a 5K limit, and the next two
+  runs were refused with `429` and retry times of about 20 seconds.
+- **Concurrent bursts overshoot more.** In the pilot, 5 runs started together pushed 61K
+  tokens through a 30K-per-minute limit in about 40 seconds without a single `429`, and
+  the daily counter lagged by several thousand tokens before blocking. Treat per-minute
+  limits as protection against sustained abuse and runaway loops, not as an exact meter;
+  daily and monthly quotas did enforce (`403` with the time until the UTC reset).
 - **Quota windows are fixed and UTC.** Daily resets at 00:00 UTC; monthly on the 1st.
   A run that crosses midnight UTC starts a fresh run counter; the runtime budget still applies.
 - **Counters are per gateway region.** In a multi-region APIM they aren't aggregated.
@@ -308,7 +317,7 @@ files. A test checks they agree: same agents, an allowed deployment, budget with
 
 ## Visibility
 
-Four streams, each with a job:
+Four streams, each with a job, plus a dashboard on top:
 
 | Stream | Where | Granularity | Use it for |
 |---|---|---|---|
@@ -316,6 +325,14 @@ Four streams, each with a job:
 | **Usage events** (`log-to-eventhub`, one per model call) | Event Hubs → data lake / Fabric / ADX | Per call: user, team, tier, agent, run, deployment, prompt/completion/cached tokens, status | Chargeback and the authoritative per-user record |
 | **Gateway and LLM logs** | Log Analytics (`ApiManagementGatewayLogs`, `ApiManagementGatewayLlmLog`) | Per request: status, latency, backend, token counts | Troubleshooting, `429`/`403` rates, cross-checks |
 | **Runtime traces** (OpenTelemetry via secsdk telemetry) | App Insights | Per run: user, agent, each model call, each tool call and outcome | Audit trail, per-user views, debugging agents |
+
+**Dashboard.** Bicep deploys an Azure Workbook, *Agent gateway* (Azure portal → Monitor →
+Workbooks, or the resource group). It shows tokens by team, agent and model; token types
+(cached and reasoning tokens); refused requests with the policy that refused them; a
+per-user table of runs, tokens and blocks; limits hit over time; model throttling and
+latency; and tool calls. Its definition is
+[`infra/workbook.json`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/infra/workbook.json).
+APIM's own **Monitoring → Analytics → Language models** tab adds token charts from the LLM logs.
 
 !!! warning "Why per-user data isn't in metrics"
     Azure Monitor custom metrics allow at most **5 custom dimensions**, and APIM tracks at
@@ -325,7 +342,8 @@ Four streams, each with a job:
 
 ### Privacy: metadata only
 
-- No prompt or completion text is stored anywhere. Leave APIM's LLM message logging off;
+- No prompt or completion text is stored anywhere. Bicep turns on APIM's LLM logs (token
+  counts per call) but not the separate *Log prompts* / *Log completions* options;
   the runtime's spans record operation names, outcomes and token counts, not content.
   secsdk's telemetry records parameter **names** only, unless `SECSDK_TELEMETRY_CAPTURE_PARAMS=true`.
 - Users are identified by Entra **object id** (`oid`), not name or email. Resolve names
@@ -335,11 +353,13 @@ Four streams, each with a job:
 
 ### Queries
 
-Tokens by team and agent (metrics), last 7 days:
+Tokens by team and agent (metrics), last 7 days. APIM emits `Prompt Tokens` and
+`Completion Tokens` (plus breakdowns such as `Prompt Cached Tokens` and
+`Completion Reasoning Tokens`); there is no total metric:
 
 ```kusto
 AppMetrics
-| where TimeGenerated > ago(7d) and Name == "Total Tokens"
+| where TimeGenerated > ago(7d) and Name in ("Prompt Tokens", "Completion Tokens")
 | extend team = tostring(Properties["Team"]), agent = tostring(Properties["Agent"])
 | summarize tokens = sum(Sum) by team, agent, bin(TimeGenerated, 1d)
 | render columnchart
@@ -381,7 +401,7 @@ To land usage events in a **data lake** with no extra compute, turn on Event Hub
 | Alert | Source | Rule |
 |---|---|---|
 | A team passes 80% of its monthly pool | Usage events | Sum of `totalTokens` this month per team ÷ pool (from `gateway.yaml`) > 0.8 |
-| Users blocked by quota | Runtime traces | `invoke_agent` spans with `error.type == "quota_exceeded"`, count by team in 15 min |
+| Users blocked by a limit | Gateway logs | `ApiManagementGatewayLogs` with `LastErrorReason` in (`OpenAITokenLimitExceeded`, `OpenAITokenQuotaExceeded`), count in 15 min; runtime `chat` spans name the limit in `agw.limit` |
 | Deployment saturation | Gateway logs | Share of `429` from the models backend over 5 min > 5% |
 | Runaway agent | Runtime traces | `budget_exhausted` stops for one agent above normal |
 | Gateway errors | Gateway logs | `5xx` rate on `/agents` |
@@ -390,8 +410,7 @@ Wire them to an action group (email, Teams, or a Logic App that opens a ticket).
 
 ## Deploy
 
-!!! note
-    Not run yet. These are the intended steps for the pilot; see [Validation plan](#validation-plan).
+These are the steps the pilot used.
 
 ```bash
 # 1. Entra: app registration, groups (put the ids in your gateway.yaml)
@@ -399,13 +418,15 @@ cd deploy/agent-gateway
 ./entra.sh app                                   # prints gatewayAppId
 ./entra.sh group <app-id> sg-agents-standard     # repeat for tiers, teams and agents
 
-# 2. Policies from your config
-uv run python render_policies.py my-gateway.yaml
+# 2. Policies from your config, into a git-ignored folder
+uv run python render_policies.py build/my-gateway.yaml --out build/policies
 
 # 3. Infrastructure without the runtime (APIM Standard v2 takes a while)
 az group create -n rg-agent-gateway -l eastus2
+#    agentsPolicyXml/modelsPolicyXml default to the example policies; pass yours, e.g. in a
+#    parameters JSON file generated from build/policies/*.xml (the pilot did this)
 az deployment group create -g rg-agent-gateway -f infra/main.bicep \
-  -p publisherEmail=<platform-team-address> gatewayAppId=<app-id>
+  -p publisherEmail=<platform-team-address> gatewayAppId=<app-id> -p @build/policies.parameters.json
 
 # 4. Let APIM and the runtime call each other (principal ids are deployment outputs)
 ./entra.sh grant <app-id> <apimPrincipalId> <runtimePrincipalId>
@@ -413,8 +434,10 @@ az deployment group create -g rg-agent-gateway -f infra/main.bicep \
 # 5. Build the runtime image from the repo root, then deploy it
 cd ../..
 az acr build -r <registryName> -t agw-runtime:0.1.0 -f deploy/agent-gateway/runtime/Dockerfile .
+#    (or docker build --platform linux/amd64 … && az acr login -n <registryName> && docker push …)
 az deployment group create -g rg-agent-gateway -f deploy/agent-gateway/infra/main.bicep \
-  -p publisherEmail=<…> gatewayAppId=<app-id> runtimeImage=<registryLoginServer>/agw-runtime:0.1.0
+  -p publisherEmail=<…> gatewayAppId=<app-id> -p @deploy/agent-gateway/build/policies.parameters.json \
+  -p runtimeImage=<registryLoginServer>/agw-runtime:0.1.0
 
 # 6. Try it
 python client.py list
@@ -429,7 +452,13 @@ Standard v2 (named values, App Insights logger with custom metrics, Event Hubs l
 diagnostic settings to Log Analytics, the two APIs and their policies, a models backend
 with a circuit breaker), an AI Services (Foundry) account with key auth disabled and the
 model deployments, Event Hubs, Container Registry, a Container Apps environment and the
-runtime app with Entra-only ingress auth, plus the role assignments.
+runtime app with Entra-only ingress auth, the *Agent gateway* workbook, APIM LLM logs
+(token counts only), plus the role assignments.
+
+**Terraform instead of Bicep** works too: the `azurerm` provider covers nearly all of these
+resources, `azapi` covers the rest (for example the Container Apps auth config and APIM's
+LLM logging setting), and `azuread` can replace `entra.sh`. The rendered policy XML is
+used the same way.
 
 ## Decisions and alternatives
 
@@ -443,27 +472,44 @@ runtime app with Entra-only ingress auth, plus the role assignments.
 | APIM tier | Standard v2 | Basic v2 (no VNet integration); Premium v2 (VNet injection, multi-region) when fully private networking is required |
 | Tools | secsdk in-process | The [MCP server](deploy-azure.md) behind APIM (APIM can front an existing MCP server, in preview). Useful when other platforms' agents need the same tools |
 
-## Validation plan
+## Pilot results
 
-Everything below is a check on a pilot deployment in a dedicated resource group, deleted afterwards:
+Deployed to a dedicated resource group (eastus2) with low limits on 24 October 2026:
+APIM Standard v2, `gpt-5-mini` (GlobalStandard, 500K TPM), the runtime on Container Apps.
 
-1. **Policies load.** Bicep deployment applies both policies. This is the first time APIM's
-   expression compiler sees them.
-2. **Identity.** A user without a tier group gets `403 no_tier`; without the agent group
-   `403 not_entitled`; a user token sent to `/models` gets `401`; calling the runtime URL
-   directly gets `401`.
-3. **Limits.** Temporarily set a tier to 2,000 TPM / 5,000 per day and drive calls until
-   `429` then `403`, checking which `x-agw-retry-after-*` header comes back. Repeat for team,
-   agent and run.
-4. **Visibility.** Metrics appear with the four dimensions; usage events arrive on the hub;
-   runtime spans carry `agw.user.id`; no prompt text appears in any table.
-5. **Load.** 20 concurrent runs to measure overshoot and the deployment `429` rate.
+| Check | Result |
+|---|---|
+| APIM accepts the generated policies, including `llm-token-limit` on a plain HTTP API | ✅ deployed without changes |
+| Token carries only the app-assigned groups (`ApplicationGroup`) and `scp=Agents.Invoke` | ✅ |
+| `GET /agents` lists only entitled agents | ✅ `cve-triage` only |
+| End-to-end run (front door → runtime → model route → Azure OpenAI, live secsdk tools) | ✅ 4 model calls, 4 tool calls, ~30 s, all remaining-quota headers returned |
+| Agent without entitlement | ✅ `403 not_entitled` |
+| No token at the front door | ✅ `401` |
+| User token sent to the model route (with forged context headers) | ✅ `401` |
+| Runtime called directly, bypassing APIM | ✅ `403` from Container Apps auth |
+| Azure OpenAI called directly | ✅ `401` (key auth disabled) |
+| Daily quota | ✅ `403 quota_exceeded`, `limit: user`, retry ≈ time to 00:00 UTC |
+| Per-minute limit, sequential use | ✅ `429 rate_limited`, retry ≈ 20 s, after one overdraw |
+| Per-minute limit, 5 concurrent runs | ⚠️ overshot ~2× without a `429` (see [How the counting behaves](#how-the-counting-behaves)) |
+| Remaining-quota headers | ⚠️ estimates; inaccurate far from the limit |
+| Token metrics with Tier/Team/Agent/Deployment | ✅ (names are `Prompt Tokens`, `Completion Tokens`, …) |
+| Usage events on Event Hubs | ✅ |
+| Runtime traces with `agw.user.id`, stop reason, tool calls | ✅ |
+| LLM logs with token counts and no message bodies | ✅ after enabling `largeLanguageModel` logs |
+| Gateway logs name the refusing policy (`OpenAITokenQuotaExceeded`, `llm-token-limit[1]`) | ✅ |
+
+Fixes found by the pilot (already in the code): the CLI client asks for `/.default`
+(the Azure CLI credential rejects named scopes); Bicep takes environment-specific policy
+XML as parameters; LLM logs and the workbook are part of the Bicep.
+
+Not yet tested: `403 no_tier` (needs a fresh token after leaving the tier group), team and
+agent quotas at their limits, and a 20-run load test.
 
 ## Risks and open items
 
-- **Unverified against a live APIM:** policy expression compilation, `llm-token-limit`
-  on an API added as plain HTTP rather than through the LLM API import wizard, and the
-  remaining-quota headers on success. The validation plan covers these.
+- **Burst overshoot:** per-minute limits overshoot under concurrent load (see the pilot).
+  If a hard per-minute ceiling matters, add a request-count `rate-limit-by-key` per user on
+  the model route, or cap concurrent runs per user at the front door.
 - **Teams bot** is designed here but not built.
 - **Conversation state** is the client's job (the runtime is stateless). A shared
   conversation store would need per-user isolation.

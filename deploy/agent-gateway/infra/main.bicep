@@ -45,6 +45,12 @@ param runtimeImage string = ''
 @description('SEC requires a User-Agent with a contact address for EDGAR requests.')
 param secUserAgent string = 'Your Org security@your-org.example'
 
+@description('Front-door policy XML rendered from your gateway.yaml. Defaults to the example config.')
+param agentsPolicyXml string = loadTextContent('../policies/agents-api.xml')
+
+@description('Model-route policy XML rendered from your gateway.yaml. Defaults to the example config.')
+param modelsPolicyXml string = loadTextContent('../policies/models-api.xml')
+
 var suffix = uniqueString(resourceGroup().id)
 var deployRuntime = !empty(runtimeImage)
 var gatewayAudience = 'api://${gatewayAppId}'
@@ -248,6 +254,31 @@ resource apimDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-0
   }
 }
 
+// Token counts per model call in ApiManagementGatewayLlmLog.
+resource llmLogs 'Microsoft.ApiManagement/service/diagnostics@2024-06-01-preview' = {
+  parent: apim
+  name: 'azuremonitor'
+  properties: {
+    loggerId: '/loggers/azuremonitor'
+    // Prompt and completion logging are separate opt-ins (requests/responses); left off.
+    largeLanguageModel: { logs: 'enabled' }
+  }
+  dependsOn: [apimDiagnosticSettings]
+}
+
+// Dashboard: Azure portal > Monitor > Workbooks > "Agent gateway".
+resource workbook 'Microsoft.Insights/workbooks@2023-06-01' = {
+  name: guid(resourceGroup().id, 'agent-gateway-workbook')
+  location: location
+  kind: 'shared'
+  properties: {
+    displayName: 'Agent gateway'
+    category: 'workbook'
+    sourceId: logs.id
+    serializedData: string(union(loadJsonContent('workbook.json'), { fallbackResourceIds: [logs.id] }))
+  }
+}
+
 resource modelsBackend 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = {
   parent: apim
   name: 'agw-models'
@@ -299,7 +330,7 @@ resource modelsPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-06-01-
   name: 'policy'
   properties: {
     format: 'xml'
-    value: loadTextContent('../policies/models-api.xml')
+    value: modelsPolicyXml
   }
   dependsOn: [nvTenant, nvGatewayApp, nvApimClient, nvRuntimeClient, modelsBackend, usageLogger]
 }
@@ -448,7 +479,7 @@ resource agentsPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-06-01-
   name: 'policy'
   properties: {
     format: 'xml'
-    value: loadTextContent('../policies/agents-api.xml')
+    value: agentsPolicyXml
   }
   dependsOn: [nvTenant, nvGatewayApp, nvApimClient, nvRuntimeClient, runtimeBackend]
 }
@@ -464,3 +495,4 @@ output runtimePrincipalId string = runtimeIdentity.properties.principalId
 output usageEventHub string = '${eventHubs.name}/${usageHub.name}'
 output appInsightsName string = appInsights.name
 output logAnalyticsWorkspaceId string = logs.properties.customerId
+output workbookId string = workbook.id

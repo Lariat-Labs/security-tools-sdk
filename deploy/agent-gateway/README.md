@@ -10,9 +10,11 @@ steps are in [docs/agent-gateway.md](../../docs/agent-gateway.md).
 | `render_policies.py` | Validates the config and writes `policies/*.xml` |
 | `policies/` | Rendered APIM policies for the example config (front door, model route) |
 | `infra/main.bicep` | APIM Standard v2, Foundry/Azure OpenAI, Event Hubs, Container Apps, monitoring |
+| `infra/workbook.json` | The *Agent gateway* Azure Workbook (dashboard) deployed by the Bicep |
 | `entra.sh` | App registration, groups, role grants for the managed identities |
 | `runtime/` | The agent runtime (FastAPI + secsdk) and its Dockerfile |
 | `client.py` | Call the gateway as yourself (`az login`) |
 | `tests/` | Offline tests: `uv run pytest deploy/agent-gateway` |
 
-Status: proposal. Unit-tested and the Bicep compiles; not yet deployed.
+Status: proposal, validated end to end in a pilot deployment (see *Pilot results* in the doc).
+Put environment-specific configs, rendered policies and parameter files in `build/` (git-ignored).

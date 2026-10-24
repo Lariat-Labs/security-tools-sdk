@@ -6,7 +6,7 @@
     python deploy/agent-gateway/client.py list
     python deploy/agent-gateway/client.py run cve-triage "Prioritise CVE-2024-3400 and CVE-2023-4966"
 
-Uses your Azure CLI sign-in to get a token for ``api://<app-id>/Agents.Invoke``
+Uses your Azure CLI sign-in to get a token for ``api://<app-id>/.default``, which carries ``Agents.Invoke``
 (entra.sh pre-authorises the Azure CLI for that scope). Your tier, team and agent
 access come from your Entra groups; the gateway enforces your token limits.
 """
@@ -38,7 +38,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.gateway or not args.app_id:
         ap.error("set AGW_GATEWAY_URL and AGW_GATEWAY_APP_ID (or pass --gateway/--app-id)")
 
-    token = AzureCliCredential().get_token(f"api://{args.app_id}/Agents.Invoke").token
+    # The Azure CLI credential only takes "/.default"; the token still carries Agents.Invoke
+    # because entra.sh pre-authorises the Azure CLI for that scope.
+    token = AzureCliCredential().get_token(f"api://{args.app_id}/.default").token
     headers = {"Authorization": f"Bearer {token}"}
     base = args.gateway.rstrip("/") + "/agents"
     with httpx.Client(headers=headers, timeout=300) as http:

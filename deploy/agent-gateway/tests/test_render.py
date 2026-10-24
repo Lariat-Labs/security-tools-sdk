@@ -144,3 +144,16 @@ def test_check_mode_detects_stale_files(tmp_path):
     assert rp.main([str(EXAMPLE), "--out", str(tmp_path), "--check"]) == 0
     (tmp_path / "models-api.xml").write_text("<policies />")
     assert rp.main([str(EXAMPLE), "--out", str(tmp_path), "--check"]) == 1
+
+
+def test_workbook_is_valid_and_queries_the_gateway_tables():
+    import json
+
+    wb = json.loads((GATEWAY_DIR / "infra" / "workbook.json").read_text())
+    assert wb["version"] == "Notebook/1.0"
+    queries = [i["content"]["query"] for i in wb["items"] if i["type"] == 3]
+    assert queries and all("{TimeRange}" in q for q in queries)
+    joined = "\n".join(queries)
+    for table in ("AppMetrics", "AppDependencies", "ApiManagementGatewayLogs"):
+        assert table in joined
+    assert '"Total Tokens"' not in joined  # APIM emits Prompt/Completion Tokens only

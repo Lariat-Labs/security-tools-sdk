@@ -1,0 +1,161 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "name": "intro",
+      "content": {
+        "json": "## Agent gateway\nToken use, limits and agent activity. Per-user rows come from runtime traces (users are Entra object ids); team, agent and model totals come from APIM token metrics."
+      }
+    },
+    {
+      "type": 9,
+      "name": "params",
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "6c1f3d52-0a77-4c5e-9d3e-1a2b3c4d5e01",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": 3,
+      "name": "tokens-by-team",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"Prompt Tokens\", \"Completion Tokens\") | summarize tokens = sum(Sum) by team = tostring(Properties[\"Team\"]), bin(TimeGenerated, {TimeRange:grain})",
+        "size": 0,
+        "title": "Tokens by team",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "tokens-by-agent",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"Prompt Tokens\", \"Completion Tokens\") | summarize tokens = sum(Sum) by agent = tostring(Properties[\"Agent\"]), model = tostring(Properties[\"Deployment\"]) | order by tokens desc",
+        "size": 0,
+        "title": "Tokens by agent and model",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "token-types",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name has \"Tokens\" | summarize tokens = sum(Sum) by Name | where tokens > 0 | order by tokens desc",
+        "size": 0,
+        "title": "Token types (cached and reasoning tokens affect cost)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "blocked",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs | where TimeGenerated {TimeRange} and ResponseCode in (401, 403, 429) | summarize requests = count() by api = ApiId, status = ResponseCode, reason = LastErrorReason, policy = LastErrorSource | order by requests desc",
+        "size": 0,
+        "title": "Refused requests: which policy and why",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "users",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and Name startswith \"invoke_agent \" | extend user = tostring(Properties[\"agw.user.id\"]), team = tostring(Properties[\"agw.team\"]), tier = tostring(Properties[\"agw.tier\"]), agent = tostring(Properties[\"gen_ai.agent.name\"]), stop = tostring(Properties[\"agw.stop_reason\"]), tokens = toint(Properties[\"gen_ai.usage.input_tokens\"]) + toint(Properties[\"gen_ai.usage.output_tokens\"]) | summarize runs = count(), tokens = sum(tokens), blocked = countif(Success == false), budget_stops = countif(stop == \"budget_exhausted\") by user, team, tier, agent | order by tokens desc",
+        "size": 0,
+        "title": "Users: runs, tokens and blocks",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      }
+    },
+    {
+      "type": 3,
+      "name": "limits-hit",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and Name startswith \"chat \" and Success == false | summarize hits = count() by limit = tostring(Properties[\"agw.limit\"]), bin(TimeGenerated, {TimeRange:grain})",
+        "size": 0,
+        "title": "Limits hit over time",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "backend",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "ApiManagementGatewayLogs | where TimeGenerated {TimeRange} and ApiId == \"agw-models\" and isnotempty(BackendResponseCode) | summarize calls = count(), throttled = countif(BackendResponseCode == 429), p95_ms = percentile(BackendTime, 95) by bin(TimeGenerated, {TimeRange:grain})",
+        "size": 0,
+        "title": "Model calls, throttling and p95 latency",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "tools",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and Name startswith \"execute_tool \" | summarize calls = count(), failed = countif(isnotempty(tostring(Properties[\"error.type\"]))), p95_ms = percentile(DurationMs, 95) by tool = tostring(Properties[\"gen_ai.tool.name\"]) | order by calls desc",
+        "size": 0,
+        "title": "Tool calls (secsdk operations)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      }
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": []
+}
