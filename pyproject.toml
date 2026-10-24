@@ -1,0 +1,53 @@
+[project]
+name = "security-tools-sdk"
+version = "0.1.0"
+description = "Workspace root: secsdk (Python SDK) + secctl (CLI) for security data sources."
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = ["secsdk", "secctl"]
+
+[tool.uv]
+package = false
+default-groups = ["dev", "docs"]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+secsdk = { workspace = true }
+secctl = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/secsdk/tests", "packages/secctl/tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+# B006: operation defaults like `types: list[str] = ["A"]` are safe because every call
+# is validated through a pydantic model, which copies defaults per call.
+ignore = ["E501", "RUF012", "B006"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["secsdk", "secctl"]
