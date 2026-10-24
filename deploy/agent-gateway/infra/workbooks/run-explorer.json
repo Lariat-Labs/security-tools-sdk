@@ -1,0 +1,178 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "name": "intro",
+      "content": {
+        "json": "## Run explorer\nPick a **session** (one chat conversation), then a **run** (one question), to see the user's input and every model call and tool call in order, with tool arguments.\n\n**Search** matches user input and tool arguments, e.g. `CVE-2024-3400` or a domain. Inputs and arguments are kept for 30 days; runs without captured content still show their steps."
+      }
+    },
+    {
+      "type": 9,
+      "name": "parameters",
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000002",
+            "version": "KqlParameterItem/1.0",
+            "name": "Search",
+            "label": "Search inputs and tool arguments",
+            "type": 1,
+            "description": "e.g. CVE-2024-3400",
+            "value": ""
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000003",
+            "version": "KqlParameterItem/1.0",
+            "name": "User",
+            "label": "User (object id)",
+            "type": 1,
+            "description": "Entra object id",
+            "value": ""
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000004",
+            "version": "KqlParameterItem/1.0",
+            "name": "Agent",
+            "label": "Agent",
+            "type": 1,
+            "description": "e.g. cve-triage",
+            "value": ""
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000005",
+            "version": "KqlParameterItem/1.0",
+            "name": "Session",
+            "label": "Session",
+            "type": 1,
+            "description": "Set by selecting a row",
+            "value": "",
+            "isHiddenWhenLocked": true
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000006",
+            "version": "KqlParameterItem/1.0",
+            "name": "RunId",
+            "label": "RunId",
+            "type": 1,
+            "description": "Set by selecting a row",
+            "value": "",
+            "isHiddenWhenLocked": true
+          }
+        ]
+      }
+    },
+    {
+      "type": 3,
+      "name": "sessions",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let runs = AppDependencies\n| where TimeGenerated {TimeRange} and Name startswith \"invoke_agent \"\n| extend run = tostring(Properties[\"agw.run_id\"]), session = tostring(Properties[\"gen_ai.conversation.id\"]),\n         user = tostring(Properties[\"agw.user.id\"]), team = tostring(Properties[\"agw.team\"]),\n         agent = tostring(Properties[\"gen_ai.agent.name\"]), stop = tostring(Properties[\"agw.stop_reason\"]),\n         tokens = toint(Properties[\"gen_ai.usage.input_tokens\"]) + toint(Properties[\"gen_ai.usage.output_tokens\"]),\n         tool_calls = toint(Properties[\"agw.tool_calls\"]);\nlet inputs = AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.user_input\"\n| project run = tostring(Properties[\"agw.run_id\"]), input = tostring(Properties[\"agw.input\"]);\nlet args = AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.tool_arguments\"\n| project run = tostring(Properties[\"agw.run_id\"]), arguments = tostring(Properties[\"gen_ai.tool.call.arguments\"]);\nlet term = \"{Search}\";\nlet hits = union (inputs | where input contains term | project run), (args | where arguments contains term | project run)\n| distinct run;\nlet filtered = runs\n| where (isempty(\"{User}\") or user == \"{User}\") and (isempty(\"{Agent}\") or agent == \"{Agent}\")\n| where isempty(term) or run in (hits);\nlet names = AppDependencies\n| where TimeGenerated > ago(90d) and Name startswith \"invoke_agent \" and isnotempty(tostring(Properties[\"agw.user.name\"]))\n| summarize arg_max(TimeGenerated, name = tostring(Properties[\"agw.user.name\"]), upn = tostring(Properties[\"agw.user.upn\"]))\n    by user = tostring(Properties[\"agw.user.id\"])\n| project user, name, upn;\nfiltered\n| join kind=leftouter inputs on run\n| order by TimeGenerated asc\n| summarize started = min(TimeGenerated), runs = dcount(run), tokens = sum(tokens), tool_calls = sum(tool_calls),\n            blocked = countif(Success == false), first_input = tostring(make_list(input)[0]) by session, user, team\n| join kind=leftouter names on user\n| project started, who = iff(isempty(name), user, strcat(name, \" (\", upn, \")\")), team, runs, tokens, tool_calls,\n          blocked, first_input, session\n| order by started desc",
+        "size": 0,
+        "title": "Sessions (select one)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "exportFieldName": "session",
+        "exportParameterName": "Session",
+        "exportDefaultValue": ""
+      }
+    },
+    {
+      "type": 3,
+      "name": "runs",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let runs = AppDependencies\n| where TimeGenerated {TimeRange} and Name startswith \"invoke_agent \"\n| extend run = tostring(Properties[\"agw.run_id\"]), session = tostring(Properties[\"gen_ai.conversation.id\"]),\n         user = tostring(Properties[\"agw.user.id\"]), team = tostring(Properties[\"agw.team\"]),\n         agent = tostring(Properties[\"gen_ai.agent.name\"]), stop = tostring(Properties[\"agw.stop_reason\"]),\n         tokens = toint(Properties[\"gen_ai.usage.input_tokens\"]) + toint(Properties[\"gen_ai.usage.output_tokens\"]),\n         tool_calls = toint(Properties[\"agw.tool_calls\"]);\nlet inputs = AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.user_input\"\n| project run = tostring(Properties[\"agw.run_id\"]), input = tostring(Properties[\"agw.input\"]);\nlet args = AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.tool_arguments\"\n| project run = tostring(Properties[\"agw.run_id\"]), arguments = tostring(Properties[\"gen_ai.tool.call.arguments\"]);\nlet term = \"{Search}\";\nlet hits = union (inputs | where input contains term | project run), (args | where arguments contains term | project run)\n| distinct run;\nlet filtered = runs\n| where (isempty(\"{User}\") or user == \"{User}\") and (isempty(\"{Agent}\") or agent == \"{Agent}\")\n| where isempty(term) or run in (hits);\nfiltered\n| where isempty(\"{Session}\") or session == \"{Session}\"\n| join kind=leftouter inputs on run\n| project TimeGenerated, agent, input, stop, tokens, tool_calls, seconds = round(DurationMs / 1000.0, 1),\n          ok = Success, run, session, user\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Runs (select one) \u2014 in the selected session, or all matching runs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "exportFieldName": "run",
+        "exportParameterName": "RunId",
+        "exportDefaultValue": ""
+      }
+    },
+    {
+      "type": 3,
+      "name": "timeline",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let r = \"{RunId}\";\nlet steps = AppDependencies\n| where TimeGenerated {TimeRange} and tostring(Properties[\"agw.run_id\"]) == r and (Name startswith \"chat \" or Name startswith \"execute_tool \")\n| extend turn = toint(Properties[\"agw.turn\"]), call_id = tostring(Properties[\"gen_ai.tool.call.id\"]),\n         tool = tostring(Properties[\"gen_ai.tool.name\"]), requested = tostring(Properties[\"agw.tools_requested\"]),\n         tokens_in = toint(Properties[\"gen_ai.usage.input_tokens\"]), tokens_out = toint(Properties[\"gen_ai.usage.output_tokens\"]),\n         outcome = coalesce(tostring(Properties[\"agw.tool.outcome\"]), tostring(Properties[\"agw.limit\"]), iff(Success, \"ok\", \"failed\"));\nlet arguments = AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.tool_arguments\" and tostring(Properties[\"agw.run_id\"]) == r\n| project call_id = tostring(Properties[\"gen_ai.tool.call.id\"]), arguments = tostring(Properties[\"gen_ai.tool.call.arguments\"]);\nlet input = AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.user_input\" and tostring(Properties[\"agw.run_id\"]) == r\n| project TimeGenerated, turn = toint(-1), step = \"user input\", detail = tostring(Properties[\"agw.input\"]), outcome = \"\", ms = real(null);\nunion input,\n  (steps\n   | join kind=leftouter arguments on call_id\n   | project TimeGenerated, turn,\n             step = iff(Name startswith \"chat \",\n                        strcat(\"model \u2192 \", iff(isempty(requested), \"final answer\", strcat(\"calls \", requested))),\n                        strcat(\"tool \", tool)),\n             detail = iff(Name startswith \"chat \", strcat(tokens_in, \" tokens in / \", tokens_out, \" out\"), arguments),\n             outcome, ms = round(DurationMs))\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Run timeline: input \u2192 model calls \u2192 tool calls",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "conditionalVisibility": {
+        "parameterName": "RunId",
+        "comparison": "isNotEqualTo",
+        "value": ""
+      }
+    },
+    {
+      "type": 3,
+      "name": "upstream",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let r = \"{RunId}\";\nlet op = toscalar(AppDependencies | where TimeGenerated {TimeRange} and Name startswith \"invoke_agent \" and tostring(Properties[\"agw.run_id\"]) == r | take 1 | project OperationId);\nAppDependencies\n| where TimeGenerated {TimeRange} and OperationId == op and (Name startswith \"secsdk \" or DependencyType !in (\"InProc\", \"\"))\n| where not(Name startswith \"chat \") and not(Name startswith \"execute_tool \") and not(Name startswith \"invoke_agent \")\n| project TimeGenerated, call = Name, target = Target, status = ResultCode, ok = Success, ms = round(DurationMs),\n          cache_hit = tostring(Properties[\"secsdk.cache_hit\"])\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Upstream API calls made by the tools in this run",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "conditionalVisibility": {
+        "parameterName": "RunId",
+        "comparison": "isNotEqualTo",
+        "value": ""
+      }
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": []
+}

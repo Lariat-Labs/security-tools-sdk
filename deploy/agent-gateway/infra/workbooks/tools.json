@@ -1,0 +1,178 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "name": "intro",
+      "content": {
+        "json": "## Tools\nHow agents use secsdk tools: volume, failures, latency, what they ask for, and which upstream APIs are slow. Argument views need content capture (30-day retention)."
+      }
+    },
+    {
+      "type": 9,
+      "name": "parameters",
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "a3e1c6d2-0001-4c55-9e0a-000000000002",
+            "version": "KqlParameterItem/1.0",
+            "name": "Search",
+            "label": "Search tool arguments",
+            "type": 1,
+            "description": "e.g. CVE-2024-3400 or example.com",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": 3,
+      "name": "search",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.tool_arguments\"\n| extend tool = tostring(Properties[\"gen_ai.tool.name\"]), arguments = tostring(Properties[\"gen_ai.tool.call.arguments\"]),\n         user = tostring(Properties[\"agw.user.id\"]), session = tostring(Properties[\"gen_ai.conversation.id\"]),\n         agent = tostring(Properties[\"gen_ai.agent.name\"]), run = tostring(Properties[\"agw.run_id\"])\n| where isnotempty(\"{Search}\") and arguments contains \"{Search}\"\n| project TimeGenerated, tool, arguments, agent, user, session, run\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Tool calls whose arguments match the search",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table",
+        "noDataMessage": "Type a value in Search (for example a CVE id)."
+      }
+    },
+    {
+      "type": 3,
+      "name": "calls-over-time",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies\n| where TimeGenerated {TimeRange} and Name startswith \"execute_tool \"\n| extend tool = tostring(Properties[\"gen_ai.tool.name\"]), agent = tostring(Properties[\"gen_ai.agent.name\"]),\n         outcome = tostring(Properties[\"agw.tool.outcome\"]) | summarize calls = count() by tool, bin(TimeGenerated, {TimeRange:grain})",
+        "size": 0,
+        "title": "Tool calls over time",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "timechart"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "per-tool",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies\n| where TimeGenerated {TimeRange} and Name startswith \"execute_tool \"\n| extend tool = tostring(Properties[\"gen_ai.tool.name\"]), agent = tostring(Properties[\"gen_ai.agent.name\"]),\n         outcome = tostring(Properties[\"agw.tool.outcome\"])\n| summarize calls = count(), failed = countif(isnotempty(outcome) and outcome != \"ok\"), p50_ms = round(percentile(DurationMs, 50)),\n            p95_ms = round(percentile(DurationMs, 95)), agents = make_set(agent) by tool\n| extend failure_pct = round(100.0 * failed / calls, 1)\n| order by calls desc",
+        "size": 0,
+        "title": "Per tool: volume, failures and latency",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "errors",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies\n| where TimeGenerated {TimeRange} and Name startswith \"execute_tool \"\n| extend tool = tostring(Properties[\"gen_ai.tool.name\"]), agent = tostring(Properties[\"gen_ai.agent.name\"]),\n         outcome = tostring(Properties[\"agw.tool.outcome\"]) | where isnotempty(outcome) and outcome != \"ok\" | summarize failures = count() by tool, outcome | order by failures desc",
+        "size": 0,
+        "title": "Failures by tool and error code",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "cves",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.tool_arguments\"\n| extend tool = tostring(Properties[\"gen_ai.tool.name\"]), arguments = tostring(Properties[\"gen_ai.tool.call.arguments\"]),\n         user = tostring(Properties[\"agw.user.id\"]), session = tostring(Properties[\"gen_ai.conversation.id\"]),\n         agent = tostring(Properties[\"gen_ai.agent.name\"]), run = tostring(Properties[\"agw.run_id\"])\n| extend cve = extract_all(@\"(CVE-\\d{4}-\\d{4,7})\", toupper(arguments))\n| mv-expand cve to typeof(string)\n| where isnotempty(cve)\n| summarize lookups = count(), users = dcount(user), tools = make_set(tool), last_seen = max(TimeGenerated) by cve\n| order by lookups desc\n| take 50",
+        "size": 0,
+        "title": "Most-queried CVEs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "top-arguments",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| where TimeGenerated {TimeRange} and Message == \"agw.tool_arguments\"\n| extend tool = tostring(Properties[\"gen_ai.tool.name\"]), arguments = tostring(Properties[\"gen_ai.tool.call.arguments\"]),\n         user = tostring(Properties[\"agw.user.id\"]), session = tostring(Properties[\"gen_ai.conversation.id\"]),\n         agent = tostring(Properties[\"gen_ai.agent.name\"]), run = tostring(Properties[\"agw.run_id\"])\n| extend bag = parse_json(arguments)\n| mv-expand kind = array kv = bag\n| extend param = tostring(kv[0]), value = tostring(kv[1])\n| where value != \"[redacted]\"\n| summarize calls = count() by tool, param, value\n| order by calls desc\n| take 100",
+        "size": 0,
+        "title": "Top argument values per tool",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      },
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "name": "upstream",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies\n| where TimeGenerated {TimeRange} and AppRoleName == \"agent-gateway-runtime\" and DependencyType !in (\"InProc\", \"\") and Name !startswith \"POST \"\n| summarize calls = count(), errors = countif(Success == false), p95_ms = round(percentile(DurationMs, 95)),\n            retries = sum(toint(Properties[\"http.request.resend_count\"])) by host = Target\n| order by calls desc",
+        "size": 0,
+        "title": "Upstream APIs called by tools (secsdk HTTP)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "__AGW_WORKSPACE_ID__"
+        ],
+        "visualization": "table"
+      }
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": []
+}

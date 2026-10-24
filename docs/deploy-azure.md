@@ -137,6 +137,11 @@ Deploy separate Function Apps per trust level, for example:
 
 Restrict tools further on the Foundry side with `allowed_tools`.
 
+!!! tip "Per-user token limits"
+    Foundry agents can't enforce token limits per end user. To offer agents to Entra users
+    and groups with per-user, per-team and per-agent token limits, see the
+    [Agent gateway proposal](agent-gateway.md).
+
 ## 4. Connect a Foundry agent
 
 **Portal:** in your Foundry project, open the agent, **Add tool → Model Context Protocol**, and set:

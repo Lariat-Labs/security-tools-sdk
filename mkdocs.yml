@@ -82,6 +82,22 @@ nav:
   - Using with agents: agents.md
   - Observability: observability.md
   - Deploy to Azure (MCP + Foundry): deploy-azure.md
+  - Agent gateway (APIM proposal): agent-gateway.md
+  - Agent gateway field manual:
+      - field-manual/index.md
+      - 00 The big picture: field-manual/00-big-picture.md
+      - 01 The SDK and CLI: field-manual/01-sdk.md
+      - 02 Identity and tokens: field-manual/02-identity.md
+      - 03 The APIM front door: field-manual/03-front-door.md
+      - 04 Token limits: field-manual/04-limits.md
+      - 05 The agent runtime: field-manual/05-runtime.md
+      - 06 Models and quota: field-manual/06-models.md
+      - 07 OBO and the web chat: field-manual/07-obo.md
+      - 08 The Teams bot: field-manual/08-teams.md
+      - 09 Observability: field-manual/09-observability.md
+      - 10 Cost and chargeback: field-manual/10-cost.md
+      - 11 Infrastructure as code: field-manual/11-iac.md
+      - 12 Wrap-up and teardown: field-manual/12-wrap-up.md
   - Extending the SDK: extending.md
   - Reference:
       - Operations: reference/operations.md

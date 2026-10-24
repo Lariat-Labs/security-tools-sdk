@@ -1,0 +1,101 @@
+<policies>
+  <inbound>
+    <base />
+    <validate-azure-ad-token tenant-id="{{agw-tenant-id}}" output-token-variable-name="agw-jwt"
+        failed-validation-httpcode="401"
+        failed-validation-error-message="Sign in with a Microsoft Entra token for the agent gateway.">
+      <audiences>
+        <audience>api://{{agw-gateway-app-id}}</audience>
+        <audience>{{agw-gateway-app-id}}</audience>
+      </audiences>
+      <required-claims>
+        <claim name="scp" match="any" separator=" ">
+          <value>Agents.Invoke</value>
+        </claim>
+      </required-claims>
+    </validate-azure-ad-token>
+    <set-variable name="agw-user" value='@(((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("oid", ""))' />
+    <set-variable name="agw-groups" value='@("," + ((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("groups", "").ToLowerInvariant() + ",")' />
+    <set-variable name="agw-tier" value='@{ var g = ((string)context.Variables["agw-groups"]); if (g.Contains(",00000000-0000-0000-0000-00000000a002,")) { return "power"; } if (g.Contains(",00000000-0000-0000-0000-00000000a001,")) { return "standard"; } return ""; }' />
+    <set-variable name="agw-team" value='@{ var g = ((string)context.Variables["agw-groups"]); if (g.Contains(",00000000-0000-0000-0000-00000000b001,")) { return "secops"; } if (g.Contains(",00000000-0000-0000-0000-00000000b002,")) { return "it-ops"; } return "unassigned"; }' />
+    <set-variable name="agw-allowed" value='@{ var g = ((string)context.Variables["agw-groups"]); var a = ""; if (g.Contains(",00000000-0000-0000-0000-00000000c001,")) { a += ",cve-triage"; } if (g.Contains(",00000000-0000-0000-0000-00000000c002,")) { a += ",threat-brief"; } return a.Length &gt; 0 ? a.Substring(1) : a; }' />
+    <set-variable name="agw-cost-center" value='@{ var t = ((string)context.Variables["agw-team"]); if (t == "secops") { return "1001"; } if (t == "it-ops") { return "1002"; } if (t == "unassigned") { return "9000"; } return ""; }' />
+    <set-variable name="agw-agent" value='@(context.Request.MatchedParameters.GetValueOrDefault("agent", ""))' />
+    <set-variable name="agw-session" value='@{ var s = context.Request.Headers.GetValueOrDefault("x-agw-session", ""); return System.Text.RegularExpressions.Regex.IsMatch(s, "^[A-Za-z0-9-]{1,64}$") ? s : context.RequestId.ToString(); }' />
+    <choose>
+      <when condition='@(((string)context.Variables["agw-tier"]).Length == 0)'>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "no_tier", "message": "Your account is not in an agent access tier. Ask for access to an agents group."}}</set-body>
+        </return-response>
+      </when>
+      <when condition='@{ var a = ((string)context.Variables["agw-agent"]); return a.Length &gt; 0 &amp;&amp; !("," + ((string)context.Variables["agw-allowed"]) + ",").Contains("," + a + ","); }'>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "not_entitled", "message": "You don't have access to this agent."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <rate-limit-by-key calls="10" renewal-period="60"
+        counter-key='@("runs:" + ((string)context.Variables["agw-user"]))'
+        increment-condition='@(context.Request.Method == "POST")' />
+    <choose>
+      <when condition='@(context.Operation.Id == "whoami")'>
+        <return-response>
+          <set-status code="200" reason="OK" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>@{ var tier = ((string)context.Variables["agw-tier"]); var team = ((string)context.Variables["agw-team"]); var limits = new JObject(); long pool = 0; if (tier == "power") { limits = new JObject(new JProperty("tokensPerMinute", 60000), new JProperty("tokensPerDay", 1500000), new JProperty("tokensPerMonth", 20000000)); } if (tier == "standard") { limits = new JObject(new JProperty("tokensPerMinute", 20000), new JProperty("tokensPerDay", 300000), new JProperty("tokensPerMonth", 4000000)); } if (team == "secops") { pool = 60000000; } if (team == "it-ops") { pool = 20000000; } if (team == "unassigned") { pool = 5000000; } var agents = new JArray(((string)context.Variables["agw-allowed"]).Split(new[] { "," }, StringSplitOptions.RemoveEmptyEntries)); return new JObject(new JProperty("user", new JObject(new JProperty("id", ((string)context.Variables["agw-user"])), new JProperty("name", ((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("name", "")), new JProperty("upn", ((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("preferred_username", "")))), new JProperty("tier", tier), new JProperty("team", team), new JProperty("costCenter", ((string)context.Variables["agw-cost-center"])), new JProperty("agents", agents), new JProperty("limits", new JObject(new JProperty("user", limits), new JProperty("teamTokensPerMonth", pool), new JProperty("runsPerMinute", 10)))).ToString(); }</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <set-header name="x-agw-user" exists-action="override">
+      <value>@(((string)context.Variables["agw-user"]))</value>
+    </set-header>
+    <set-header name="x-agw-tier" exists-action="override">
+      <value>@(((string)context.Variables["agw-tier"]))</value>
+    </set-header>
+    <set-header name="x-agw-team" exists-action="override">
+      <value>@(((string)context.Variables["agw-team"]))</value>
+    </set-header>
+    <set-header name="x-agw-allowed-agents" exists-action="override">
+      <value>@(((string)context.Variables["agw-allowed"]))</value>
+    </set-header>
+    <set-header name="x-agw-cost-center" exists-action="override">
+      <value>@(((string)context.Variables["agw-cost-center"]))</value>
+    </set-header>
+    <set-header name="x-agw-client" exists-action="override">
+      <value>@(((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("azp", ((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("appid", "")))</value>
+    </set-header>
+    <set-header name="x-agw-user-name" exists-action="override">
+      <value>@(((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("name", ""))</value>
+    </set-header>
+    <set-header name="x-agw-user-upn" exists-action="override">
+      <value>@(((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("preferred_username", ""))</value>
+    </set-header>
+    <set-header name="x-agw-run" exists-action="override">
+      <value>@(context.RequestId.ToString())</value>
+    </set-header>
+    <set-header name="x-agw-session" exists-action="override">
+      <value>@(((string)context.Variables["agw-session"]))</value>
+    </set-header>
+    <set-backend-service backend-id="agw-runtime" />
+    <authentication-managed-identity resource="api://{{agw-gateway-app-id}}" client-id="{{agw-apim-client-id}}" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

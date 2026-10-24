@@ -9,7 +9,7 @@ dependencies = ["secsdk", "secctl"]
 
 [tool.uv]
 package = false
-default-groups = ["dev", "docs", "examples"]
+default-groups = ["dev", "docs", "examples", "gateway"]
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -34,9 +34,20 @@ examples = [
     "anthropic>=2.3.0",
     "pyyaml>=6.0.3",
 ]
+gateway = [
+    "azure-ai-projects>=2.3.0",
+    "azure-identity>=1.26.0",
+    "fastapi>=0.162.0",
+    "microsoft-agents-activity==1.8.0",
+    "microsoft-agents-authentication-msal==1.8.0",
+    "microsoft-agents-hosting-aiohttp==1.8.0",
+    "microsoft-agents-hosting-core==1.8.0",
+    "openai>=3.37.0",
+    "uvicorn>=0.54.0",
+]
 
 [tool.pytest.ini_options]
-testpaths = ["packages/secsdk/tests", "packages/secctl/tests", "examples/tests", "deploy/azure-functions/tests"]
+testpaths = ["packages/secsdk/tests", "packages/secctl/tests", "examples/tests", "deploy/azure-functions/tests", "deploy/agent-gateway/tests"]
 addopts = "-ra"
 
 [tool.ruff]
@@ -55,4 +66,4 @@ plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
 
 [tool.ruff.lint.isort]
-known-first-party = ["secsdk", "secctl"]
+known-first-party = ["secsdk", "secctl", "agw_runtime", "agw_chat", "agw_teams", "render_policies", "mcp_tools"]

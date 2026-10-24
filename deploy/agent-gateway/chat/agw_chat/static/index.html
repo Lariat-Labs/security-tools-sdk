@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Gateway Chat</title>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@5.24.0/lib/msal-browser.min.js"
+        integrity="sha384-H7sosGYmNJhd2Ut1g7bc3d4wVKnPaePDXJnsauSDVvuuYKcAbuJ0RU0A9KOd8f0X"
+        crossorigin="anonymous"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --line: #dfe3ea;
+    --accent: #2f5bd3; --accent-text: #ffffff; --user: #e8eefc; --warn-bg: #fff4e0; --warn: #8a5300;
+    --err-bg: #fdecec; --err: #a12a2a; --ok: #1d7a4a; --code: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #9aa3b2; --line: #2c3340;
+      --accent: #6d8ff0; --accent-text: #0f1320; --user: #233052; --warn-bg: #3a2c12; --warn: #f2c27a;
+      --err-bg: #3d1d1d; --err: #f3a3a3; --ok: #6fd3a0; --code: #232a35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  button, select, textarea { font: inherit; color: inherit; }
+  button { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  #chat { display: flex; flex-direction: column; min-height: 70vh; }
+  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-bottom: 12px; }
+  .msg { padding: 10px 12px; border-radius: 10px; max-width: 100%; overflow-x: auto; }
+  .msg.user { background: var(--user); align-self: flex-end; max-width: 85%; white-space: pre-wrap; }
+  .msg.agent { border: 1px solid var(--line); }
+  .msg.error { background: var(--err-bg); color: var(--err); }
+  .msg.warn { background: var(--warn-bg); color: var(--warn); }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; }
+  .meta code { background: var(--code); padding: 0 4px; border-radius: 4px; }
+  .msg table { border-collapse: collapse; margin: 6px 0; font-size: 13.5px; }
+  .msg th, .msg td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+  .msg code { background: var(--code); padding: 0 4px; border-radius: 4px; }
+  .msg h3, .msg h4 { margin: 8px 0 4px; }
+  .msg ul { margin: 4px 0; padding-left: 20px; }
+  form { display: flex; gap: 8px; align-items: flex-end; border-top: 1px solid var(--line); padding-top: 12px; }
+  textarea { flex: 1; min-height: 44px; max-height: 200px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); }
+  select { border: 1px solid var(--line); border-radius: 8px; padding: 6px; background: var(--bg); }
+  aside h2 { font-size: 14px; margin: 0 0 8px; }
+  aside dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; margin: 0 0 12px; font-size: 13px; }
+  aside dt { color: var(--muted); }
+  aside dd { margin: 0; overflow-wrap: anywhere; }
+  .hint { color: var(--muted); font-size: 13px; }
+  .ok { color: var(--ok); }
+  #signin { text-align: center; padding: 48px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent gateway chat</h1>
+  <span id="who" class="hint"></span>
+  <button id="login" class="primary" hidden>Sign in</button>
+  <button id="logout" hidden>Sign out</button>
+</header>
+
+<div id="signin" hidden>
+  <p>Sign in with your work account. Your agents and token limits come from your Entra groups.</p>
+</div>
+
+<main id="app" hidden>
+  <section id="chat" class="panel">
+    <div id="log" aria-live="polite"></div>
+    <form id="composer">
+      <select id="agent" aria-label="Agent"></select>
+      <textarea id="input" placeholder="e.g. Prioritise CVE-2024-3400 and CVE-2023-4966" required></textarea>
+      <button id="send" class="primary" type="submit">Send</button>
+    </form>
+  </section>
+  <aside class="panel">
+    <h2>On-behalf-of (OBO)</h2>
+    <p class="hint">Your browser gets a token for this chat app. The chat backend exchanges it with Entra for a gateway token that still represents you.</p>
+    <div id="obo" class="hint">Loading…</div>
+    <h2>Remaining (approximate)</h2>
+    <div id="limits" class="hint">Run an agent to see your limits.</div>
+    <h2>Session</h2>
+    <p class="hint">Filter on this id in the <em>Run explorer</em> workbook.</p>
+    <p><code id="session"></code></p>
+    <button id="newchat" type="button">New conversation</button>
+  </aside>
+</main>
+
+<script>
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const cfg = await (await fetch("/api/config")).json();
+  const pca = new msal.PublicClientApplication({
+    auth: {
+      clientId: cfg.clientId,
+      authority: `https://login.microsoftonline.com/${cfg.tenantId}`,
+      redirectUri: window.location.origin + "/",
+    },
+    cache: { cacheLocation: "sessionStorage" },
+  });
+  await pca.initialize();
+  const redirect = await pca.handleRedirectPromise({ hash: window.location.hash });
+  let account = (redirect && redirect.account) || pca.getAllAccounts()[0];
+
+  $("login").onclick = () => pca.loginRedirect({ scopes: [cfg.scope] });
+  $("logout").onclick = () => pca.logoutRedirect({ account });
+
+  if (!account) {
+    $("signin").hidden = false; $("login").hidden = false;
+    return;
+  }
+  pca.setActiveAccount(account);
+  $("app").hidden = false; $("logout").hidden = false;
+  $("who").textContent = account.name || account.username;
+
+  async function token() {
+    try {
+      return (await pca.acquireTokenSilent({ scopes: [cfg.scope], account })).accessToken;
+    } catch (e) {
+      if (e instanceof msal.InteractionRequiredAuthError) await pca.acquireTokenRedirect({ scopes: [cfg.scope] });
+      throw e;
+    }
+  }
+  async function api(path, options = {}) {
+    const res = await fetch(path, {
+      ...options,
+      headers: { "Authorization": `Bearer ${await token()}`, "Content-Type": "application/json" },
+    });
+    let body = null;
+    try { body = await res.json(); } catch { body = { error: { code: `http_${res.status}`, message: res.statusText } }; }
+    return { status: res.status, body, retryAfter: res.headers.get("Retry-After") };
+  }
+
+  // ----- minimal, safe markdown (escape first, then format) -----
+  const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  function markdown(text) {
+    const lines = text.split("\n"); const out = []; let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (/^\s*\|/.test(line)) {
+        const rows = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(lines[i++]);
+        const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+        const body = rows.filter((r) => !/^[\s|:-]+$/.test(r)); // drop the |---|---| separator row
+        out.push("<table>" + body.map((r, n) => "<tr>" + cells(r).map((c) => n === 0 ? `<th>${inline(c)}</th>` : `<td>${inline(c)}</td>`).join("") + "</tr>").join("") + "</table>");
+        continue;
+      }
+      if (/^\s*[-*] /.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*] /.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*[-*] /, ""))}</li>`);
+        out.push(`<ul>${items.join("")}</ul>`); continue;
+      }
+      const h = line.match(/^(#{1,4})\s+(.*)/);
+      if (h) out.push(`<h${Math.min(h[1].length + 2, 4)}>${inline(h[2])}</h${Math.min(h[1].length + 2, 4)}>`);
+      else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+      i++;
+    }
+    return out.join("");
+  }
+
+  const log = $("log"); let history = [];
+  let sessionId = crypto.randomUUID();
+  $("session").textContent = sessionId;
+  function add(kind, html) {
+    const div = document.createElement("div"); div.className = `msg ${kind}`; div.innerHTML = html;
+    log.appendChild(div); log.scrollTop = log.scrollHeight; return div;
+  }
+  function showLimits(limits) {
+    const names = { user_minute: "You, this minute", user_daily: "You, today", user_monthly: "You, this month",
+                    team_monthly: "Your team, this month", agent_daily: "Agent, today", run: "This run" };
+    const rows = Object.entries(limits || {}).map(([k, v]) => `<dt>${esc(names[k] || k)}</dt><dd>${Number(v).toLocaleString()}</dd>`);
+    $("limits").innerHTML = rows.length ? `<dl>${rows.join("")}</dl>` : "No limit headers returned.";
+  }
+
+  // ----- identity panel and agents -----
+  function gatewayView(g) {
+    if (!g || g.error) return `<p>Gateway view unavailable (${esc(String(g && g.error))}).</p>`;
+    const u = (g.limits && g.limits.user) || {};
+    const n = (v) => (v === undefined ? "" : Number(v).toLocaleString());
+    return `<strong>Gateway view (GET /agents/me)</strong><dl>` +
+      `<dt>tier</dt><dd>${esc(g.tier)}</dd><dt>team</dt><dd>${esc(g.team)}</dd>` +
+      `<dt>cost center</dt><dd>${esc(g.costCenter || "")}</dd>` +
+      `<dt>agents</dt><dd>${esc((g.agents || []).join(", "))}</dd>` +
+      `<dt>tokens/min</dt><dd>${n(u.tokensPerMinute)}</dd><dt>tokens/day</dt><dd>${n(u.tokensPerDay)}</dd>` +
+      `<dt>tokens/month</dt><dd>${n(u.tokensPerMonth)}</dd>` +
+      `<dt>team pool/month</dt><dd>${n(g.limits && g.limits.teamTokensPerMonth)}</dd></dl>` +
+      `<p class="hint">Derived by APIM from your groups; not in the token.</p>`;
+  }
+  api("/api/whoami").then(({ status, body }) => {
+    if (status !== 200) { $("obo").textContent = body.error?.message || `HTTP ${status}`; return; }
+    const row = (t) => `<dt>aud</dt><dd>${esc(String(t.aud))}</dd><dt>scp</dt><dd>${esc(String(t.scp))}</dd>` +
+      `<dt>azp</dt><dd>${esc(String(t.azp))}</dd><dt>groups</dt><dd>${t.groups}</dd><dt>oid</dt><dd>${esc(String(t.oid))}</dd>`;
+    const same = body.token_for_chat_app.oid === body.obo_token_for_gateway.oid;
+    $("obo").innerHTML = `<strong>Your token → chat app</strong><dl>${row(body.token_for_chat_app)}</dl>` +
+      `<strong>OBO token → gateway</strong><dl>${row(body.obo_token_for_gateway)}</dl>` +
+      (same ? `<p class="ok">Same user (oid) in both tokens: OBO is working.</p>` : `<p>oid differs!</p>`) +
+      gatewayView(body.gateway_view);
+  });
+  const agents = await api("/api/agents");
+  if (agents.status !== 200 || !Array.isArray(agents.body) || !agents.body.length) {
+    add("error", esc(agents.body?.error?.message || "You don't have access to any agents."));
+    $("send").disabled = true;
+  } else {
+    for (const a of agents.body) $("agent").add(new Option(a.name, a.name));
+    add("agent", `<p>Signed in. You can use: ${agents.body.map((a) => `<strong>${esc(a.name)}</strong> (${esc(a.description)})`).join(", ")}.</p>`);
+  }
+
+  $("newchat").onclick = () => {
+    history = []; log.innerHTML = ""; sessionId = crypto.randomUUID(); $("session").textContent = sessionId;
+  };
+  $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("composer").requestSubmit(); } });
+  $("composer").onsubmit = async (e) => {
+    e.preventDefault();
+    const input = $("input").value.trim(); if (!input) return;
+    const agent = $("agent").value;
+    add("user", esc(input)); $("input").value = ""; $("send").disabled = true;
+    const pending = add("agent", `<span class="hint">${esc(agent)} is working… (tools run on the server; this can take a minute)</span>`);
+    const started = performance.now();
+    const { status, body, retryAfter } = await api("/api/chat", { method: "POST", body: JSON.stringify({ agent, input, history, session_id: sessionId }) });
+    const secs = ((performance.now() - started) / 1000).toFixed(1);
+    pending.remove(); $("send").disabled = false;
+    if (status === 200) {
+      const tools = body.tool_calls.map((t) => `<code>${esc(t.operation || t.name)}</code>${t.ok ? "" : " ✗"}`).join(" ");
+      add("agent", markdown(body.output) +
+        `<div class="meta">${esc(body.stop_reason)} · ${body.usage.total_tokens.toLocaleString()} tokens in ${body.usage.model_calls} model calls · ${secs}s` +
+        (tools ? `<br>Tools: ${tools}` : "") + `<br>Run <code>${esc(body.run_id)}</code></div>`);
+      history.push({ role: "user", content: input }, { role: "assistant", content: body.output });
+      history = history.slice(-20);
+      showLimits(body.limits);
+    } else {
+      const err = body.error || {};
+      const kind = status === 429 || err.code === "quota_exceeded" ? "warn" : "error";
+      const wait = err.retry_after || retryAfter;
+      add(kind, `<strong>${esc(err.code || "error")}</strong>: ${esc(err.message || `HTTP ${status}`)}` +
+        (err.limit ? `<div class="meta">Limit: <code>${esc(err.limit)}</code>${wait ? ` · retry in ${esc(String(wait))}s` : ""}</div>` : ""));
+    }
+  };
+})().catch((e) => {
+  document.body.insertAdjacentHTML("beforeend", `<p style="padding:16px;color:#a12a2a">Error: ${String(e.message || e).replace(/</g, "&lt;")}</p>`);
+});
+</script>
+</body>
+</html>

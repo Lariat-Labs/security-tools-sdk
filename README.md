@@ -52,6 +52,9 @@ uv run python examples/agent/run_workflow.py cve-triage --input cves="CVE-2024-3
 - **Foundry agents:** `deploy/azure-functions/` hosts the SDK as a remote MCP server on
   Azure Functions, and `deploy/foundry/create_agent.py` wires it to a Foundry agent
   (`docs/deploy-azure.md`).
+- **Agents as a service (proposal):** `deploy/agent-gateway/` puts agents behind Azure API
+  Management with per-user, per-team, per-agent and per-deployment token limits from Entra
+  groups, plus usage events for chargeback (`docs/agent-gateway.md`).
 
 ## Docs
 

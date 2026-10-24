@@ -12,6 +12,7 @@ Monitor and secsdk's spans and metrics flow into Application Insights automatica
 """
 
 import azure.functions as func
+
 import mcp_tools as tools
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)

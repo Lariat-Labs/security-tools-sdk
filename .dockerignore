@@ -1,0 +1,10 @@
+# Allow-list: only what container images need. Everything else (including .envrc,
+# .env and .venv) never reaches the build context.
+*
+!packages/secsdk/pyproject.toml
+!packages/secsdk/README.md
+!packages/secsdk/src/**
+!deploy/agent-gateway/runtime/**
+!deploy/agent-gateway/chat/**
+!deploy/agent-gateway/teams/agw_teams/**
+**/__pycache__

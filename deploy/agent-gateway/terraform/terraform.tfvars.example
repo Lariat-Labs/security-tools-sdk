@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+subscription_id     = "00000000-0000-0000-0000-000000000000"
+resource_group_name = "rg-agent-gateway"
+location            = "eastus2"
+prefix              = "agw"
+publisher_email     = "platform-team@your-org.example"
+
+# Policies rendered from your gateway.yaml (render_policies.py --out ../build/policies)
+agents_policy_file = "../build/policies/agents-api.xml"
+models_policy_file = "../build/policies/models-api.xml"
+
+# Assign the tier/team/agent groups in your gateway.yaml to the gateway app (Entra ID P1)
+# gateway_config_file  = "../build/my-gateway.yaml"
+# assign_config_groups = true
+
+# Second apply, after pushing images to the registry (output registry_login_server)
+# runtime_image = "<registry>.azurecr.io/agw-runtime:0.3.0"
+# chat_image    = "<registry>.azurecr.io/agw-chat:0.3.0"
+# teams_image   = "<registry>.azurecr.io/agw-teams:0.2.0"
+
+# Needed for the Teams bot only (see the variable's description for the one-liner)
+# tenant_id_base64url = ""

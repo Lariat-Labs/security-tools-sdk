@@ -1,0 +1,220 @@
+<policies>
+  <inbound>
+    <base />
+    <validate-azure-ad-token tenant-id="{{agw-tenant-id}}" output-token-variable-name="agw-jwt"
+        failed-validation-httpcode="401"
+        failed-validation-error-message="Only the agent runtime may call models.">
+      <client-application-ids>
+        <application-id>{{agw-runtime-client-id}}</application-id>
+      </client-application-ids>
+      <audiences>
+        <audience>api://{{agw-gateway-app-id}}</audience>
+        <audience>{{agw-gateway-app-id}}</audience>
+      </audiences>
+      <required-claims>
+        <claim name="roles" match="any">
+          <value>Gateway.Internal</value>
+        </claim>
+      </required-claims>
+    </validate-azure-ad-token>
+    <set-variable name="agw-user" value='@(context.Request.Headers.GetValueOrDefault("x-agw-user", ""))' />
+    <set-variable name="agw-tier" value='@(context.Request.Headers.GetValueOrDefault("x-agw-tier", ""))' />
+    <set-variable name="agw-team" value='@(context.Request.Headers.GetValueOrDefault("x-agw-team", ""))' />
+    <set-variable name="agw-agent" value='@(context.Request.Headers.GetValueOrDefault("x-agw-agent", ""))' />
+    <set-variable name="agw-run" value='@(context.Request.Headers.GetValueOrDefault("x-agw-run", ""))' />
+    <set-variable name="agw-session" value='@(context.Request.Headers.GetValueOrDefault("x-agw-session", ""))' />
+    <set-variable name="agw-cost-center" value='@{ var t = ((string)context.Variables["agw-team"]); if (t == "secops") { return "1001"; } if (t == "it-ops") { return "1002"; } if (t == "unassigned") { return "9000"; } return ""; }' />
+    <set-variable name="agw-model" value='@{ var b = context.Request.Body == null ? null : context.Request.Body.As&lt;JObject&gt;(preserveContent: true); return b == null ? "" : (b.Value&lt;string&gt;("model") ?? ""); }' />
+    <set-variable name="agw-stream" value='@{ var b = context.Request.Body == null ? null : context.Request.Body.As&lt;JObject&gt;(preserveContent: true); return b != null &amp;&amp; (b.Value&lt;bool?&gt;("stream") ?? false); }' />
+    <choose>
+      <when condition='@(((string)context.Variables["agw-user"]).Length == 0 || ((string)context.Variables["agw-tier"]).Length == 0 || ((string)context.Variables["agw-team"]).Length == 0 || ((string)context.Variables["agw-agent"]).Length == 0 || ((string)context.Variables["agw-run"]).Length == 0 || ((string)context.Variables["agw-model"]).Length == 0)'>
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "missing_context", "message": "x-agw-* context headers and a model are required."}}</set-body>
+        </return-response>
+      </when>
+      <when condition='@((bool)context.Variables["agw-stream"])'>
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "streaming_not_supported", "message": "Use non-streaming calls so token usage is exact."}}</set-body>
+        </return-response>
+      </when>
+      <when condition='@{ var a = ((string)context.Variables["agw-agent"]); var m = ((string)context.Variables["agw-model"]); if (a == "cve-triage") { return !(m == "gpt-5-mini"); } if (a == "threat-brief") { return !(m == "gpt-5-mini"); } return true; }'>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "model_not_allowed", "message": "This agent may not use that model."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <choose>
+      <when condition='@(((string)context.Variables["agw-model"]) == "gpt-5-mini")'>
+        <llm-token-limit counter-key='@("d:" + ((string)context.Variables["agw-model"]))'
+            tokens-per-minute="400000"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-deployment" />
+      </when>
+      <otherwise>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "unknown_model", "message": "This model is not available through the gateway."}}</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
+    <choose>
+      <when condition='@(((string)context.Variables["agw-agent"]) == "cve-triage")'>
+        <llm-token-limit counter-key='@("a:" + ((string)context.Variables["agw-agent"]))'
+            tokens-per-minute="150000"
+            token-quota="10000000"
+            token-quota-period="Daily"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-agent"
+            remaining-quota-tokens-header-name="x-agw-agent-daily-remaining" />
+        <llm-token-limit counter-key='@("r:" + ((string)context.Variables["agw-run"]))'
+            token-quota="300000"
+            token-quota-period="Daily"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-run"
+            remaining-quota-tokens-header-name="x-agw-run-remaining" />
+      </when>
+      <when condition='@(((string)context.Variables["agw-agent"]) == "threat-brief")'>
+        <llm-token-limit counter-key='@("a:" + ((string)context.Variables["agw-agent"]))'
+            tokens-per-minute="100000"
+            token-quota="5000000"
+            token-quota-period="Daily"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-agent"
+            remaining-quota-tokens-header-name="x-agw-agent-daily-remaining" />
+        <llm-token-limit counter-key='@("r:" + ((string)context.Variables["agw-run"]))'
+            token-quota="400000"
+            token-quota-period="Daily"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-run"
+            remaining-quota-tokens-header-name="x-agw-run-remaining" />
+      </when>
+      <otherwise>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "unknown_agent", "message": "Unknown agent."}}</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
+    <choose>
+      <when condition='@(((string)context.Variables["agw-tier"]) == "power")'>
+        <llm-token-limit counter-key='@("u:" + ((string)context.Variables["agw-user"]) + ":power")'
+            tokens-per-minute="60000"
+            token-quota="1500000"
+            token-quota-period="Daily"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-user"
+            remaining-quota-tokens-header-name="x-agw-user-daily-remaining"
+            remaining-tokens-header-name="x-agw-user-minute-remaining" />
+        <llm-token-limit counter-key='@("u:" + ((string)context.Variables["agw-user"]) + ":month")'
+            token-quota="20000000"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-user-month"
+            remaining-quota-tokens-header-name="x-agw-user-monthly-remaining" />
+      </when>
+      <when condition='@(((string)context.Variables["agw-tier"]) == "standard")'>
+        <llm-token-limit counter-key='@("u:" + ((string)context.Variables["agw-user"]) + ":standard")'
+            tokens-per-minute="20000"
+            token-quota="300000"
+            token-quota-period="Daily"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-user"
+            remaining-quota-tokens-header-name="x-agw-user-daily-remaining"
+            remaining-tokens-header-name="x-agw-user-minute-remaining" />
+        <llm-token-limit counter-key='@("u:" + ((string)context.Variables["agw-user"]) + ":month")'
+            token-quota="4000000"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-user-month"
+            remaining-quota-tokens-header-name="x-agw-user-monthly-remaining" />
+      </when>
+      <otherwise>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "unknown_tier", "message": "Unknown tier."}}</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
+    <choose>
+      <when condition='@(((string)context.Variables["agw-team"]) == "secops")'>
+        <llm-token-limit counter-key='@("t:" + ((string)context.Variables["agw-team"]))'
+            token-quota="60000000"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-team"
+            remaining-quota-tokens-header-name="x-agw-team-monthly-remaining" />
+      </when>
+      <when condition='@(((string)context.Variables["agw-team"]) == "it-ops")'>
+        <llm-token-limit counter-key='@("t:" + ((string)context.Variables["agw-team"]))'
+            token-quota="20000000"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-team"
+            remaining-quota-tokens-header-name="x-agw-team-monthly-remaining" />
+      </when>
+      <when condition='@(((string)context.Variables["agw-team"]) == "unassigned")'>
+        <llm-token-limit counter-key='@("t:" + ((string)context.Variables["agw-team"]))'
+            token-quota="5000000"
+            token-quota-period="Monthly"
+            estimate-prompt-tokens="false"
+            retry-after-header-name="x-agw-retry-after-team"
+            remaining-quota-tokens-header-name="x-agw-team-monthly-remaining" />
+      </when>
+      <otherwise>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error": {"code": "unknown_team", "message": "Unknown team."}}</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
+    <llm-emit-token-metric namespace="agent-gateway">
+      <dimension name="Tier" value='@(((string)context.Variables["agw-tier"]))' />
+      <dimension name="Team" value='@(((string)context.Variables["agw-team"]))' />
+      <dimension name="Agent" value='@(((string)context.Variables["agw-agent"]))' />
+      <dimension name="Deployment" value='@(((string)context.Variables["agw-model"]))' />
+      <dimension name="CostCenter" value='@(((string)context.Variables["agw-cost-center"]))' />
+    </llm-emit-token-metric>
+    <set-header name="x-agw-user" exists-action="delete" />
+    <set-header name="x-agw-tier" exists-action="delete" />
+    <set-header name="x-agw-team" exists-action="delete" />
+    <set-header name="x-agw-agent" exists-action="delete" />
+    <set-header name="x-agw-run" exists-action="delete" />
+    <set-header name="x-agw-session" exists-action="delete" />
+    <set-backend-service backend-id="agw-models" />
+    <authentication-managed-identity resource="https://cognitiveservices.azure.com" client-id="{{agw-apim-client-id}}" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <log-to-eventhub logger-id="agw-usage">@{ var r = context.Response.StatusCode == 200 ? context.Response.Body.As&lt;JObject&gt;(preserveContent: true) : null; var u = r == null ? null : r["usage"] as JObject; var d = u == null ? null : u["prompt_tokens_details"] as JObject; return new JObject(new JProperty("time", DateTime.UtcNow.ToString("o")), new JProperty("requestId", context.RequestId.ToString()), new JProperty("runId", ((string)context.Variables["agw-run"])), new JProperty("sessionId", ((string)context.Variables["agw-session"])), new JProperty("user", ((string)context.Variables["agw-user"])), new JProperty("tier", ((string)context.Variables["agw-tier"])), new JProperty("team", ((string)context.Variables["agw-team"])), new JProperty("costCenter", ((string)context.Variables["agw-cost-center"])), new JProperty("agent", ((string)context.Variables["agw-agent"])), new JProperty("deployment", ((string)context.Variables["agw-model"])), new JProperty("status", context.Response.StatusCode), new JProperty("promptTokens", u == null ? 0 : (u.Value&lt;int?&gt;("prompt_tokens") ?? 0)), new JProperty("completionTokens", u == null ? 0 : (u.Value&lt;int?&gt;("completion_tokens") ?? 0)), new JProperty("cachedTokens", d == null ? 0 : (d.Value&lt;int?&gt;("cached_tokens") ?? 0)), new JProperty("totalTokens", u == null ? 0 : (u.Value&lt;int?&gt;("total_tokens") ?? 0))).ToString(Newtonsoft.Json.Formatting.None); }</log-to-eventhub>
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
