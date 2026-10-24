@@ -64,6 +64,73 @@ quota per hour/day/week/month/year, or both. For it to see the user on **every**
 call, the agent loop has to run somewhere that forwards the user's context. That's our
 runtime.
 
+## Why the agents are external in Foundry
+
+In the Foundry portal, `cve-triage` and `threat-brief` are marked **external**, with no model,
+instructions or tools. That's deliberate.
+
+**How they became external.** `register_agents.py` registers each agent with
+`ExternalAgentDefinition(otel_agent_id=<name>)`. For an external agent, Foundry stores only a
+registration record. It doesn't host, run or call the agent. Its **Traces** tab works by
+matching spans in the connected Application Insights whose `gen_ai.agent.id` equals that id,
+and the runtime sets that attribute on every span. So Foundry shows traces, while the model,
+instructions and tools fields stay empty.
+
+**Why not a normal Foundry agent.** The design depends on every model call passing through
+APIM carrying the user's identity, because that's how per-user, per-team and per-agent token
+limits are enforced. A standard Foundry agent (a *prompt agent*) has Foundry Agent Service run
+the loop, and its model calls go straight to the model, never through your gateway; Microsoft
+confirms this is by design ([Microsoft Q&A](https://learn.microsoft.com/answers/questions/5777255/azure-ai-foundry-does-ai-agent-service-route-model)).
+Running the loop in our own runtime means every model call goes back through APIM's model
+route with the user's context. Registering the agents as external keeps Foundry's trace view
+and trace-based evaluations without giving up that control.
+
+| | Standard Foundry agent (prompt) | Gateway agents (external) |
+|---|---|---|
+| Who runs the loop | Foundry Agent Service | The gateway runtime (Container Apps) |
+| Definition lives in | Foundry (model, instructions, tools) | `runtime/agw_runtime/agents/*.yaml` in this repository |
+| Tools | Foundry tools: MCP, OpenAPI, Code Interpreter, File Search… | secsdk operations, run inside the runtime |
+| Model calls | Direct to the deployment | Through APIM, with per-user limits, metrics and usage events |
+| Identity | An Entra Agent ID per agent | Users' Entra tokens; managed identities between services |
+| Invoked by | Foundry's Responses endpoint | The gateway's `/agents/{agent}/runs` |
+| What Foundry shows | Everything | Description, metadata and traces |
+| Per-user token limits | Not possible | Enforced on every model call |
+
+**The model deployment.** The `gpt-5-mini` deployment in the same AI Services account is
+GlobalStandard: Microsoft-hosted shared capacity billed per token (the portal may call it
+serverless or standard), as opposed to provisioned throughput. It belongs to the account, not
+to the agents: no Foundry agent references it, and the runtime reaches it only through APIM,
+because key authentication is off and only APIM's identity may call it.
+
+**What Foundry does show.** Foundry's page for an external agent has no system prompt or tools
+section, and its description is limited to 512 characters (metadata values too). So:
+
+- **The agent page** shows the description, which carries the agent's summary **and its tool
+  list**. The registration also stores metadata (model deployment, providers, `max_turns`, token
+  budgets, how to invoke it, a link to the definition, the commit it was registered from). The
+  portal may not display the metadata; the API and SDK return it.
+- **Every trace** carries the agent's configuration in the OpenTelemetry GenAI attributes
+  Foundry's trace view reads: `gen_ai.system_instructions` (the system prompt) and
+  `gen_ai.tool.definitions` (tool names and descriptions; parameters are left out to stay under
+  Application Insights' 8,192-character property limit). These are configuration, not user
+  data, so they're recorded whether or not content capture is on.
+
+Re-run `register_agents.py` after changing an agent so the page details don't go stale (each
+run adds a new revision of the registration); `--dry-run` shows what it would send.
+
+**Talking to the agents.** Foundry's playground can't run external agents: Foundry never calls
+them. Use any client of the gateway's `/agents/{agent}/runs` endpoint with an Entra token for
+the gateway: the [web chat](#clients), the CLI (`client.py run <agent> "<question>"`), the Teams
+bot, or plain HTTP from your own app or a script (see [Clients](#clients)).
+
+| To see | Look at |
+|---|---|
+| Instructions, model, tool providers, budgets | `runtime/agw_runtime/agents/<agent>.yaml` |
+| Who can use it and its token limits | `gateway.yaml`: the agent's `group_id`, `tokens_per_minute`, `tokens_per_day`, `tokens_per_run` |
+| The tools behind its providers | `uv run secctl guide` |
+| What it did on each run | Foundry → the agent → **Traces**; the *run explorer* workbook; App Insights transaction search |
+| Usage, cost and users | the *Agent gateway* workbook |
+
 ## Architecture
 
 ```mermaid
@@ -423,7 +490,9 @@ view shows each run as a tree too.
 connected, and `register_agents.py` registers each agent as an **external agent** (preview).
 Foundry matches spans by `gen_ai.agent.id` (the agent name), so each agent's **Traces** tab in
 the Foundry portal shows its runs. Captured content lives in span events (below), so the
-Foundry view shows structure, tokens and latency rather than inputs.
+Foundry view shows structure, tokens and latency rather than inputs. Why the agents are
+external, and what Foundry does and doesn't show about them: see
+[Why the agents are external in Foundry](#why-the-agents-are-external-in-foundry).
 
 ### Sessions and captured content
 
@@ -569,8 +638,8 @@ docker push <registryLoginServer>/agw-teams:0.2.0
 az deployment group create … -p teamsAppId=<teamsAppId> teamsImage=<registryLoginServer>/agw-teams:0.2.0
 uv run python teams/package.py --app-id <teamsAppId> --bot-host <teamsBotEndpoint host>
 
-# 9. Foundry trace view: register the agents as external agents
-uv run python register_agents.py --endpoint <foundryProjectEndpoint>
+# 9. Foundry trace view: register the agents as external agents (re-run after changing an agent)
+uv run python register_agents.py --endpoint <foundryProjectEndpoint> --gateway-url <gatewayUrl>
 ```
 
 The image build context is the repo root, and `.dockerignore` is an allow-list

@@ -537,3 +537,43 @@ def test_runs_record_end_user_and_auth_flow(spans, monkeypatch, client, flow):
     assert run.attributes["enduser.id"] == CTX.user
     assert run.attributes["agentctl.auth_flow"] == flow
     spans.clear()
+
+
+def test_foundry_registration_details_stay_within_limits():
+    sys.path.insert(0, str(GATEWAY_DIR))
+    import register_agents as reg
+
+    for definition in load_agents().values():
+        description, metadata = reg.registration_details(
+            definition, gateway_url="https://apim.example/", ref="abc123"
+        )
+        assert len(description) <= reg.MAX_DESCRIPTION
+        assert len(metadata) <= reg.MAX_KEYS
+        assert all(len(k) <= reg.MAX_KEY and len(v) <= reg.MAX_VALUE for k, v in metadata.items())
+        assert metadata["invoke"] == f"POST https://apim.example/agents/{definition.name}/runs"
+        assert metadata["definition"].endswith(
+            f"/blob/abc123/{reg.AGENTS_PATH}/{definition.name}.yaml"
+        )
+        assert metadata["model_deployment"].startswith(definition.deployment)
+        assert definition.instructions[:40] not in description + "".join(metadata.values())
+        assert "kev_lookup" in description  # the tools are visible on the agent page
+
+
+def test_run_span_carries_system_instructions_and_tools(spans, monkeypatch):
+    monkeypatch.delenv("AGW_CAPTURE_CONTENT", raising=False)  # config is recorded regardless
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s")
+    _run_with_tool(ctx)
+    run = next(s for s in _ours(spans) if s.name.startswith("invoke_agent"))
+    system = json.loads(run.attributes["gen_ai.system_instructions"])
+    assert system == [{"type": "text", "content": "Use the tools."}]
+    tools = json.loads(run.attributes["gen_ai.tool.definitions"])
+    assert {t["name"] for t in tools} == {"kev_lookup", "kev_search", "kev_stats"}
+    assert all("parameters" not in t for t in tools)
+
+
+def test_agent_config_attributes_stay_under_the_property_limit():
+    from agw_runtime.loop import MAX_ATTRIBUTE_CHARS, agent_config_attributes
+
+    tools = [{"function": {"name": f"tool_{i}", "description": "d" * 400}} for i in range(100)]
+    attrs = agent_config_attributes("x" * 20000, tools)
+    assert all(len(v) <= MAX_ATTRIBUTE_CHARS for v in attrs.values())
