@@ -9,6 +9,10 @@
     a policy generator, Bicep, an agent runtime, a dashboard and Entra setup. It was
     deployed end to end to a pilot subscription; see [Pilot results](#pilot-results).
 
+!!! tip "Learning it hands-on"
+    The [Agent gateway field manual](field-manual/index.md) walks through every piece of a deployed
+    gateway in 13 short modules, with commands to run and pages to look at.
+
 ## Summary
 
 Users in Microsoft Entra ID call agents through one APIM gateway. The gateway knows who
