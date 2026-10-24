@@ -70,8 +70,12 @@ resource "azurerm_container_app" "runtime" {
           OTEL_SERVICE_NAME                     = "agent-gateway-runtime"
           OTEL_TRACES_SAMPLER                   = local.otel_always_on.value
           AGW_CAPTURE_CONTENT                   = var.capture_content ? "true" : "false"
-          SECSDK_SEC_USER_AGENT                 = var.sec_user_agent
-          SECSDK_TIMEOUT                        = "30"
+          AGW_OBO_CLIENT_IDS = join(",", compact([
+            local.deploy_chat ? azuread_application_registration.chat[0].client_id : "",
+            local.deploy_teams ? azuread_application_registration.teams[0].client_id : "",
+          ]))
+          SECSDK_SEC_USER_AGENT = var.sec_user_agent
+          SECSDK_TIMEOUT        = "30"
         }
         content {
           name  = env.key

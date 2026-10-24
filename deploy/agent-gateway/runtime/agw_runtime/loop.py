@@ -204,6 +204,8 @@ class UserContext:
     cost_center: str = ""  # from the user's team, set by the gateway
     user_name: str = ""  # display name, for reports
     user_upn: str = ""  # sign-in name, for reports
+    client_app: str = ""  # the app that got the user's token (azp)
+    auth_flow: str = "delegated"  # "obo" when client_app is a middle tier (web chat, Teams bot)
 
     @property
     def session_id(self) -> str:
@@ -228,6 +230,10 @@ class UserContext:
             "session.id": self.session_id,  # fills App Insights' SessionId column
             "agw.run_id": self.run_id,
             "agw.user.id": self.user,
+            # OpenTelemetry's end-user attribute and the auth flow, as agentctl reads them.
+            "enduser.id": self.user,
+            "agentctl.auth_flow": self.auth_flow,
+            "agw.client_app": self.client_app or None,
         }
 
 

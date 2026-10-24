@@ -71,6 +71,9 @@
     <set-header name="x-agw-cost-center" exists-action="override">
       <value>@(((string)context.Variables["agw-cost-center"]))</value>
     </set-header>
+    <set-header name="x-agw-client" exists-action="override">
+      <value>@(((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("azp", ((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("appid", "")))</value>
+    </set-header>
     <set-header name="x-agw-user-name" exists-action="override">
       <value>@(((Jwt)context.Variables["agw-jwt"]).Claims.GetValueOrDefault("name", ""))</value>
     </set-header>

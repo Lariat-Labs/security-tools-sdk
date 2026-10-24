@@ -404,6 +404,26 @@ def render_agents_api(cfg: GatewayConfig) -> str:
         _set_header("x-agw-team", _var("agw-team")),
         _set_header("x-agw-allowed-agents", _var("agw-allowed")),
         _set_header("x-agw-cost-center", _var("agw-cost-center")),
+        # Which app asked for the token (azp in v2 tokens, appid in v1): lets the runtime tell a
+        # user's own client (delegated) from a middle tier acting for them (on-behalf-of).
+        _set_header(
+            "x-agw-client",
+            claims
+            + ".GetValueOrDefault("
+            + Q
+            + "azp"
+            + Q
+            + ", "
+            + claims
+            + ".GetValueOrDefault("
+            + Q
+            + "appid"
+            + Q
+            + ", "
+            + Q
+            + Q
+            + "))",
+        ),
         # Who the user is, for reports (from the validated token; never trusted for limits).
         _set_header(
             "x-agw-user-name", claims + ".GetValueOrDefault(" + Q + "name" + Q + ", " + Q + Q + ")"

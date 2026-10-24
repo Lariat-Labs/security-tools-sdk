@@ -104,6 +104,7 @@ def test_front_door_trusts_only_the_gateway(cfg):
         "x-agw-session",
     ):
         assert set_headers[header] == "override"
+    assert set_headers["x-agw-client"] == "override"  # azp/appid: delegated vs on-behalf-of
     assert set_headers["x-agw-user-name"] == "override"  # for reports only
     assert set_headers["x-agw-user-upn"] == "override"
     session = next(el for el in root.iter("set-variable") if el.attrib["name"] == "agw-session")

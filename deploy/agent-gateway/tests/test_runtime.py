@@ -510,3 +510,30 @@ def test_cached_tokens_and_user_names_are_recorded(spans):
     assert run.attributes["agw.user.name"] == "Ada Lovelace"
     assert run.attributes["agw.user.upn"] == "ada@example.com"
     assert run.attributes["agw.usage.cached_tokens"] == 600
+
+
+@pytest.mark.parametrize(
+    ("client", "flow"),
+    [
+        ("11111111-aaaa-bbbb-cccc-000000000001", "obo"),  # the web chat (a middle tier)
+        ("04b07795-8ddb-461a-bbee-02f9e1bf7b46", "delegated"),  # Azure CLI: the user's own client
+        ("", "delegated"),
+    ],
+)
+def test_runs_record_end_user_and_auth_flow(spans, monkeypatch, client, flow):
+    monkeypatch.setenv(
+        "AGW_OBO_CLIENT_IDS",
+        "11111111-AAAA-bbbb-cccc-000000000001, 22222222-aaaa-bbbb-cccc-000000000002",
+    )
+    model = FakeModel(reply("ok"))
+    _app(model).post(
+        "/agents/cve-triage/runs", json={"input": "hi"}, headers={**HEADERS, "x-agw-client": client}
+    )
+    run = next(
+        s
+        for s in spans.get_finished_spans()
+        if s.attributes.get("agw.run_id") == "run-9" and s.name.startswith("invoke_agent")
+    )
+    assert run.attributes["enduser.id"] == CTX.user
+    assert run.attributes["agentctl.auth_flow"] == flow
+    spans.clear()

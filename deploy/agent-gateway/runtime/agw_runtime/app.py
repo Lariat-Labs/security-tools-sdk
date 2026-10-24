@@ -63,6 +63,7 @@ def _context(request: Request) -> UserContext | None:
     if not (user and tier and team):
         return None
     allowed = tuple(a for a in h.get("x-agw-allowed-agents", "").split(",") if a)
+    client = h.get("x-agw-client", "")[:64]
     return UserContext(
         user=user,
         tier=tier,
@@ -73,7 +74,16 @@ def _context(request: Request) -> UserContext | None:
         cost_center=h.get("x-agw-cost-center", "")[:12],
         user_name=h.get("x-agw-user-name", "")[:200],
         user_upn=h.get("x-agw-user-upn", "")[:200],
+        client_app=client,
+        auth_flow="obo" if client and client.lower() in _obo_clients() else "delegated",
     )
+
+
+def _obo_clients() -> set[str]:
+    """Client ids of the middle tiers (web chat, Teams bot) that call the gateway on-behalf-of users."""
+    return {
+        c.strip().lower() for c in os.environ.get("AGW_OBO_CLIENT_IDS", "").split(",") if c.strip()
+    }
 
 
 def _runner_from_env() -> AgentRunner:

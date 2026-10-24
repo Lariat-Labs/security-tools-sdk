@@ -483,6 +483,8 @@ resource runtime 'Microsoft.App/containerApps@2024-03-01' = if (deployRuntime) {
             // mid-run, which leaves holes in the run timeline and audit trail.
             { name: 'OTEL_TRACES_SAMPLER', value: 'always_on' }
             { name: 'AGW_CAPTURE_CONTENT', value: captureContent ? 'true' : 'false' }
+            // Middle tiers that call on-behalf-of users: their runs are recorded as auth flow "obo".
+            { name: 'AGW_OBO_CLIENT_IDS', value: join(filter([chatAppId, teamsAppId], id => !empty(id)), ',') }
             { name: 'SECSDK_SEC_USER_AGENT', value: secUserAgent }
             { name: 'SECSDK_TIMEOUT', value: '30' }
           ]
