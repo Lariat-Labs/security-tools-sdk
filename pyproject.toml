@@ -61,4 +61,4 @@ plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
 
 [tool.ruff.lint.isort]
-known-first-party = ["secsdk", "secctl", "agw_runtime", "render_policies", "mcp_tools"]
+known-first-party = ["secsdk", "secctl", "agw_runtime", "agw_chat", "render_policies", "mcp_tools"]

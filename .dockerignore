@@ -5,4 +5,5 @@
 !packages/secsdk/README.md
 !packages/secsdk/src/**
 !deploy/agent-gateway/runtime/**
+!deploy/agent-gateway/chat/**
 **/__pycache__

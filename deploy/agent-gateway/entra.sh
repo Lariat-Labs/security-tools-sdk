@@ -5,6 +5,9 @@
 #   ./entra.sh group <app-id> <name>       create a security group and assign it to the app
 #   ./entra.sh grant <app-id> <principal-id>...
 #                                          give managed identities the Gateway.Internal role
+#   ./entra.sh chat <gateway-app-id>       create the "agent-gateway-chat" app (web chat, OBO)
+#   ./entra.sh chat-link <chat-app-id> <chat-url> <chat-mi-principal-id>
+#                                          add the redirect URI and trust the chat's managed identity
 #
 # Needs: az login as an Application Administrator (or Cloud Application Administrator).
 # Assigning groups to an application needs Microsoft Entra ID P1 or P2.
@@ -101,9 +104,69 @@ cmd_grant() {
   done
 }
 
+cmd_chat() {
+  # The chat app is both the SPA users sign in to and the API the SPA calls (access_as_user).
+  # Its backend exchanges that token for a gateway token (on-behalf-of). It has no secret:
+  # chat-link adds a federated credential that trusts the chat's managed identity.
+  local gateway_app="$1" chat_app obj_id scope_id gateway_scope
+  gateway_scope=$(az ad app show --id "$gateway_app" --query "api.oauth2PermissionScopes[?value=='Agents.Invoke'].id | [0]" -o tsv)
+  chat_app=$(az ad app create --display-name "${AGW_CHAT_APP_NAME:-agent-gateway-chat}" --sign-in-audience AzureADMyOrg --query appId -o tsv)
+  obj_id=$(az ad app show --id "$chat_app" --query id -o tsv)
+  scope_id=$(new_id)
+  az rest --method PATCH --url "$GRAPH/applications/$obj_id" --headers Content-Type=application/json --body @- <<JSON
+{
+  "identifierUris": ["api://$chat_app"],
+  "api": {
+    "requestedAccessTokenVersion": 2,
+    "oauth2PermissionScopes": [{
+      "id": "$scope_id", "value": "access_as_user", "type": "User", "isEnabled": true,
+      "adminConsentDisplayName": "Use the agent chat", "adminConsentDescription": "Use the agent gateway chat as the signed-in user.",
+      "userConsentDisplayName": "Use the agent chat", "userConsentDescription": "Use the agent gateway chat as you."
+    }]
+  }
+}
+JSON
+  az rest --method PATCH --url "$GRAPH/applications/$obj_id" --headers Content-Type=application/json --body @- <<JSON
+{
+  "requiredResourceAccess": [
+    {"resourceAppId": "$gateway_app", "resourceAccess": [{"id": "$gateway_scope", "type": "Scope"}]},
+    {"resourceAppId": "$chat_app", "resourceAccess": [{"id": "$scope_id", "type": "Scope"}]}
+  ]
+}
+JSON
+  az ad sp create --id "$chat_app" --query id -o tsv >/dev/null
+  # Tenant-wide consent, so users aren't prompted (and OBO, which can't prompt, works).
+  # Explicit grants: `az ad app permission admin-consent` can silently miss a brand-new app.
+  az ad app permission grant --id "$chat_app" --api "$gateway_app" --scope Agents.Invoke -o none
+  az ad app permission grant --id "$chat_app" --api "$chat_app" --scope access_as_user -o none
+  echo "chatAppId=$chat_app"
+  echo "Next: deploy with chatAppId, then './entra.sh chat-link $chat_app <chatUrl> <chatPrincipalId>'."
+}
+
+cmd_chat_link() {
+  local chat_app="$1" url="${2%/}" principal="$3" obj_id tenant
+  obj_id=$(az ad app show --id "$chat_app" --query id -o tsv)
+  tenant=$(az account show --query tenantId -o tsv)
+  az rest --method PATCH --url "$GRAPH/applications/$obj_id" --headers Content-Type=application/json \
+    --body "{\"spa\": {\"redirectUris\": [\"$url/\", \"http://localhost:8000/\"]}}"
+  az rest --method POST --url "$GRAPH/applications/$obj_id/federatedIdentityCredentials" \
+    --headers Content-Type=application/json --body @- >/dev/null <<JSON
+{
+  "name": "agw-chat-managed-identity",
+  "issuer": "https://login.microsoftonline.com/$tenant/v2.0",
+  "subject": "$principal",
+  "audiences": ["api://AzureADTokenExchange"],
+  "description": "The chat backend's managed identity is this app's client credential (no secret)."
+}
+JSON
+  echo "Redirect URI $url/ added; managed identity $principal trusted as the client credential."
+}
+
 case "${1:-}" in
   app) cmd_app ;;
   group) [[ $# -eq 3 ]] || { echo "usage: $0 group <app-id> <group-name>" >&2; exit 2; }; cmd_group "$2" "$3" ;;
   grant) [[ $# -ge 3 ]] || { echo "usage: $0 grant <app-id> <principal-id>..." >&2; exit 2; }; shift; cmd_grant "$@" ;;
-  *) sed -n '2,9p' "$0"; exit 2 ;;
+  chat) [[ $# -eq 2 ]] || { echo "usage: $0 chat <gateway-app-id>" >&2; exit 2; }; cmd_chat "$2" ;;
+  chat-link) [[ $# -eq 4 ]] || { echo "usage: $0 chat-link <chat-app-id> <chat-url> <chat-mi-principal-id>" >&2; exit 2; }; cmd_chat_link "$2" "$3" "$4" ;;
+  *) sed -n '2,13p' "$0"; exit 2 ;;
 esac

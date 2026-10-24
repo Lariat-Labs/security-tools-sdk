@@ -184,6 +184,39 @@ python deploy/agent-gateway/client.py list
 python deploy/agent-gateway/client.py run cve-triage "Prioritise CVE-2024-3400 and CVE-2023-4966"
 ```
 
+**Web chat (on-behalf-of).** [`chat/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/chat)
+is a sign-in page plus a small backend, deployed next to the runtime. It is the same
+middle-tier pattern a Teams bot uses, so it tests OBO without a Teams licence:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User (browser)
+    participant E as Microsoft Entra ID
+    participant C as Chat backend
+    participant G as APIM /agents
+    U->>E: sign in (MSAL.js, redirect) for api://<chat-app>/access_as_user
+    E-->>U: token, aud = chat app
+    U->>C: POST /api/chat (Bearer chat token)
+    C->>C: validate signature, issuer, audience, scope
+    C->>E: on-behalf-of: user token + client assertion<br/>(chat managed identity, federated credential)
+    E-->>C: token, aud = gateway, scp = Agents.Invoke,<br/>same user (oid), groups
+    C->>G: POST /agents/{agent}/runs (Bearer OBO token)
+    G-->>C: answer, usage, remaining limits (or 429/403)
+    C-->>U: answer
+```
+
+- **No client secret.** The chat app registration trusts the backend's managed identity
+  through a federated identity credential; the managed identity's token for
+  `api://AzureADTokenExchange` is the client assertion in the OBO request.
+- **Consent is granted tenant-wide** for `Agents.Invoke` and `access_as_user` (OBO can't
+  show a consent prompt).
+- The side panel shows the claims of both tokens (never the tokens): `aud` changes from
+  the chat app to the gateway, `azp` becomes the chat app, `oid` stays the same and the
+  gateway token carries the user's groups. That is OBO working.
+- The page keeps the conversation and sends earlier turns as `history`; the backend and
+  runtime keep no state.
+
 **Teams and M365 Copilot.** A bot (Azure Bot Service, Microsoft 365 Agents SDK) fronts
 the gateway, not the runtime:
 
@@ -199,6 +232,8 @@ the gateway, not the runtime:
    or "working on it" message, then post the answer as a proactive message.
 
 The bot itself is not in this repository yet (see [open items](#risks-and-open-items)).
+It will reuse the chat backend's `auth.py` (token validation and OBO) unchanged; only the
+front end changes. It needs a tenant with Teams licences to sideload the app.
 
 ## Limits
 
@@ -441,6 +476,14 @@ az deployment group create -g rg-agent-gateway -f deploy/agent-gateway/infra/mai
 
 # 6. Try it
 python client.py list
+
+# 7. Web chat (OBO): app registration, image, deploy, then link the redirect URI and identity
+cd deploy/agent-gateway
+./entra.sh chat <app-id>                         # prints chatAppId, grants consent
+docker build --platform linux/amd64 -t <registryLoginServer>/agw-chat:0.1.0 -f chat/Dockerfile ../..
+docker push <registryLoginServer>/agw-chat:0.1.0
+az deployment group create … -p chatAppId=<chatAppId> chatImage=<registryLoginServer>/agw-chat:0.1.0
+./entra.sh chat-link <chatAppId> <chatUrl> <chatPrincipalId>   # outputs of the deployment
 ```
 
 The image build context is the repo root, and `.dockerignore` is an allow-list
@@ -497,6 +540,8 @@ APIM Standard v2, `gpt-5-mini` (GlobalStandard, 500K TPM), the runtime on Contai
 | Runtime traces with `agw.user.id`, stop reason, tool calls | ✅ |
 | LLM logs with token counts and no message bodies | ✅ after enabling `largeLanguageModel` logs |
 | Gateway logs name the refusing policy (`OpenAITokenQuotaExceeded`, `llm-token-limit[1]`) | ✅ |
+| Web chat: OBO with a managed-identity federated credential (no secret) | ✅ gateway token has `aud` = gateway, `azp` = chat app, same `oid`, 3 groups |
+| Web chat: agent run through chat → OBO → gateway → runtime → model + tools | ✅ 3 model calls, 4 tool calls, ~17 s |
 
 Fixes found by the pilot (already in the code): the CLI client asks for `/.default`
 (the Azure CLI credential rejects named scopes); Bicep takes environment-specific policy
@@ -510,7 +555,8 @@ agent quotas at their limits, and a 20-run load test.
 - **Burst overshoot:** per-minute limits overshoot under concurrent load (see the pilot).
   If a hard per-minute ceiling matters, add a request-count `rate-limit-by-key` per user on
   the model route, or cap concurrent runs per user at the front door.
-- **Teams bot** is designed here but not built.
+- **Teams bot** is designed here but not built; the web chat proves the same OBO path.
+  It needs a Teams-licensed tenant (the pilot tenant has no Microsoft 365 licences).
 - **Conversation state** is the client's job (the runtime is stateless). A shared
   conversation store would need per-user isolation.
 - **Foundry Agent Service** may later support end-user identity on model calls; if it does,

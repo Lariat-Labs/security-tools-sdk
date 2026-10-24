@@ -42,6 +42,12 @@ param modelDeployments array = [
 @description('Runtime image, e.g. <registry>.azurecr.io/agw-runtime:0.1.0. Leave empty on the first deploy.')
 param runtimeImage string = ''
 
+@description('Client id of the agent-gateway-chat app registration (entra.sh chat). Empty: no chat app.')
+param chatAppId string = ''
+
+@description('Chat image, e.g. <registry>.azurecr.io/agw-chat:0.1.0. Needs chatAppId.')
+param chatImage string = ''
+
 @description('SEC requires a User-Agent with a contact address for EDGAR requests.')
 param secUserAgent string = 'Your Org security@your-org.example'
 
@@ -53,6 +59,7 @@ param modelsPolicyXml string = loadTextContent('../policies/models-api.xml')
 
 var suffix = uniqueString(resourceGroup().id)
 var deployRuntime = !empty(runtimeImage)
+var deployChat = deployRuntime && !empty(chatAppId) && !empty(chatImage)
 var gatewayAudience = 'api://${gatewayAppId}'
 
 // Built-in role definition ids
@@ -72,6 +79,13 @@ resource apimIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-
 
 resource runtimeIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-${prefix}-runtime'
+  location: location
+}
+
+// The web chat's identity: pulls its image, and is the chat app registration's client
+// credential for the on-behalf-of exchange (federated identity credential, no secret).
+resource chatIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: 'id-${prefix}-chat'
   location: location
 }
 
@@ -484,6 +498,58 @@ resource agentsPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-06-01-
   dependsOn: [nvTenant, nvGatewayApp, nvApimClient, nvRuntimeClient, runtimeBackend]
 }
 
+
+// ----- web chat (OBO) ------------------------------------------------------------------------
+
+resource chatPullsImages 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: registry
+  name: guid(registry.id, chatIdentity.id, roles.acrPull)
+  properties: {
+    principalId: chatIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull)
+  }
+}
+
+resource chat 'Microsoft.App/containerApps@2024-03-01' = if (deployChat) {
+  name: 'ca-${prefix}-chat'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${chatIdentity.id}': {} }
+  }
+  properties: {
+    managedEnvironmentId: containerEnv.id
+    configuration: {
+      ingress: { external: true, targetPort: 8000, transport: 'auto', allowInsecure: false }
+      registries: [{ server: registry.properties.loginServer, identity: chatIdentity.id }]
+    }
+    template: {
+      containers: [
+        {
+          name: 'chat'
+          image: chatImage
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          env: [
+            { name: 'AGW_TENANT_ID', value: tenantId }
+            { name: 'AGW_CHAT_APP_ID', value: chatAppId }
+            { name: 'AGW_GATEWAY_URL', value: apim.properties.gatewayUrl }
+            { name: 'AGW_GATEWAY_APP_ID', value: gatewayAppId }
+            { name: 'AZURE_CLIENT_ID', value: chatIdentity.properties.clientId }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
+            { name: 'OTEL_SERVICE_NAME', value: 'agent-gateway-chat' }
+          ]
+          probes: [
+            { type: 'Liveness', httpGet: { path: '/healthz', port: 8000 } }
+          ]
+        }
+      ]
+      scale: { minReplicas: 0, maxReplicas: 2 }
+    }
+  }
+  dependsOn: [chatPullsImages]
+}
+
 // ----- outputs --------------------------------------------------------------------------------
 
 output gatewayUrl string = apim.properties.gatewayUrl
@@ -496,3 +562,5 @@ output usageEventHub string = '${eventHubs.name}/${usageHub.name}'
 output appInsightsName string = appInsights.name
 output logAnalyticsWorkspaceId string = logs.properties.customerId
 output workbookId string = workbook.id
+output chatPrincipalId string = chatIdentity.properties.principalId
+output chatUrl string = deployChat ? 'https://${chat!.properties.configuration!.ingress!.fqdn}' : ''

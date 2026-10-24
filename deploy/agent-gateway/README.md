@@ -13,6 +13,7 @@ steps are in [docs/agent-gateway.md](../../docs/agent-gateway.md).
 | `infra/workbook.json` | The *Agent gateway* Azure Workbook (dashboard) deployed by the Bicep |
 | `entra.sh` | App registration, groups, role grants for the managed identities |
 | `runtime/` | The agent runtime (FastAPI + secsdk) and its Dockerfile |
+| `chat/` | Web chat: MSAL.js sign-in page + backend that calls the gateway on-behalf-of the user |
 | `client.py` | Call the gateway as yourself (`az login`) |
 | `tests/` | Offline tests: `uv run pytest deploy/agent-gateway` |
 
