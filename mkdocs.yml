@@ -80,6 +80,8 @@ nav:
   - Providers: providers.md
   - CLI: cli.md
   - Using with agents: agents.md
+  - Observability: observability.md
+  - Deploy to Azure (MCP + Foundry): deploy-azure.md
   - Extending the SDK: extending.md
   - Reference:
       - Operations: reference/operations.md

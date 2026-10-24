@@ -59,6 +59,21 @@ The repository includes an [`AGENTS.md`](https://github.com/Lariat-Labs/security
 The builder loop works because every feature can be run and checked from the
 terminal, so the agent can write, run, read and fix without you in the middle.
 
+## Runnable example
+
+[`examples/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/examples) contains a
+complete agent built on the Claude API. Its only tool is `secctl`, and it follows written
+workflows (`cve-triage`, `domain-posture`, `threat-brief`):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+uv run python examples/agent/run_workflow.py cve-triage --input cves="CVE-2024-3400 CVE-2023-4966"
+```
+
+Each workflow lists `required_commands`. The agent loop won't accept a final report until
+those `secctl` commands have actually been run, and it logs every command for review.
+Add a workflow by dropping a Markdown file into `examples/workflows/`.
+
 ## Function-calling instead of a shell
 
 If your runtime prefers native tool calls over a shell, generate tool definitions

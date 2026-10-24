@@ -4,7 +4,9 @@ Credentials, first match wins:
 
 1. ``AZURE_ACCESS_TOKEN``: a bearer token for https://management.azure.com
 2. ``AZURE_TENANT_ID`` + ``AZURE_CLIENT_ID`` + ``AZURE_CLIENT_SECRET``: service principal
-3. The Azure CLI (``az login``), if installed: ``az account get-access-token``
+3. Managed identity (``pip install 'secsdk[azure]'``): automatic inside Azure Functions /
+   App Service, or set ``SECSDK_AZURE_MANAGED_IDENTITY=true``
+4. The Azure CLI (``az login``), if installed: ``az account get-access-token``
 
 The identity needs *Reader* (and *Security Reader* for Defender data) on the
 subscriptions you query.
@@ -12,7 +14,9 @@ subscriptions you query.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -47,6 +51,14 @@ class AzureSettings(ProviderSettings):
         None, validation_alias=AliasChoices("SECSDK_AZURE_CLIENT_SECRET", "AZURE_CLIENT_SECRET")
     )
     use_cli: bool = Field(True, description="Fall back to `az account get-access-token`")
+    managed_identity: bool | None = Field(
+        None,
+        description="Use the host's managed identity (needs secsdk[azure]). "
+        "Default: on automatically inside Azure Functions / App Service.",
+    )
+    managed_identity_client_id: str | None = Field(
+        None, description="Client id of a user-assigned managed identity (omit for system-assigned)"
+    )
     subscriptions: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("SECSDK_AZURE_SUBSCRIPTIONS", "AZURE_SUBSCRIPTION_IDS"),
@@ -138,9 +150,17 @@ class Azure(Provider):
             return "token"
         if s.tenant_id and s.client_id and s.client_secret:
             return "service_principal"
+        if self._use_managed_identity():
+            return "managed_identity"
         if s.use_cli and shutil.which("az"):
             return "azure_cli"
         return None
+
+    def _use_managed_identity(self) -> bool:
+        wanted = self.settings.managed_identity
+        if wanted is None:  # auto: Functions/App Service set IDENTITY_ENDPOINT
+            wanted = bool(os.environ.get("IDENTITY_ENDPOINT"))
+        return wanted and importlib.util.find_spec("azure.identity") is not None
 
     def auth_status(self) -> AuthStatus:
         method = self._auth_method()
@@ -149,9 +169,7 @@ class Azure(Provider):
             configured=method is not None,
             missing=[]
             if method
-            else [
-                "AZURE_ACCESS_TOKEN or AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET or `az login`"
-            ],
+            else ["AZURE_ACCESS_TOKEN, a service principal, a managed identity, or `az login`"],
             note=f"auth method: {method}"
             if method
             else "Set a token, a service principal, or install the Azure CLI and run `az login`.",
@@ -177,6 +195,17 @@ class Azure(Provider):
                 data["access_token"],
                 time.time() + int(data.get("expires_in", 3600)),
             )
+        elif method == "managed_identity":
+            from azure.identity import ManagedIdentityCredential
+
+            cred = ManagedIdentityCredential(client_id=self.settings.managed_identity_client_id)
+            try:
+                tok = cred.get_token(f"{ARM}/.default")
+            except Exception as exc:
+                raise AuthError(
+                    "Managed identity could not get a token", details=str(exc)[:300]
+                ) from exc
+            self._token, self._token_exp = tok.token, float(tok.expires_on)
         elif method == "azure_cli":
             self._token, self._token_exp = _cli_token()
         else:

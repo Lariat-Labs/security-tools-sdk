@@ -9,7 +9,7 @@ dependencies = ["secsdk", "secctl"]
 
 [tool.uv]
 package = false
-default-groups = ["dev", "docs"]
+default-groups = ["dev", "docs", "examples"]
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -24,14 +24,19 @@ dev = [
     "respx>=0.21",
     "ruff>=0.6",
     "mypy>=1.11",
+    "opentelemetry-sdk>=1.45.1",
 ]
 docs = [
     "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.26",
 ]
+examples = [
+    "anthropic>=2.3.0",
+    "pyyaml>=6.0.3",
+]
 
 [tool.pytest.ini_options]
-testpaths = ["packages/secsdk/tests", "packages/secctl/tests"]
+testpaths = ["packages/secsdk/tests", "packages/secctl/tests", "examples/tests", "deploy/azure-functions/tests"]
 addopts = "-ra"
 
 [tool.ruff]

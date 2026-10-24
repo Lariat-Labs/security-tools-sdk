@@ -15,8 +15,15 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
 
+from . import telemetry
 from .config import ProviderSettings
-from .errors import ConfigError, InvalidInputError, UnknownOperationError, UpstreamError
+from .errors import (
+    ConfigError,
+    InvalidInputError,
+    SecSDKError,
+    UnknownOperationError,
+    UpstreamError,
+)
 from .operation import OP_ATTR, Operation, build_operation
 from .ratelimit import RateLimiter
 
@@ -108,6 +115,21 @@ class Provider:
 
 
 def _run(provider: Provider, op: Operation, params: dict[str, Any]) -> Any:
+    with telemetry.operation_span(op.fqname, op.provider, params) as span:
+        try:
+            result = _run_inner(provider, op, params)
+        except SecSDKError as exc:
+            span.fail(exc.code, exc)
+            raise
+        except Exception as exc:
+            span.fail("internal_error", exc)
+            raise
+        if isinstance(result, list):
+            span.set("secsdk.result.count", len(result))
+        return result
+
+
+def _run_inner(provider: Provider, op: Operation, params: dict[str, Any]) -> Any:
     try:
         validated = op.input_model.model_validate(params)
     except ValidationError as exc:

@@ -43,6 +43,19 @@ credentials for it:
 - **Azure**: `Reader` at the subscription or management-group scope, plus
   `Security Reader` if you use `azure check defender_recommendations`.
 
+## Telemetry
+
+| Setting | Default | Notes |
+|---|---|---|
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | | Export to Azure Monitor (needs `secsdk[azure-monitor]`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | | Export to any OTLP backend (needs `secsdk[otlp]`) |
+| `SECSDK_TELEMETRY_FILE` | | Write spans as JSON lines to this file |
+| `SECSDK_TELEMETRY_CAPTURE_PARAMS` | `false` | Record parameter values on spans (names are always recorded) |
+| `SECSDK_TELEMETRY` | on | `off` disables instrumentation entirely |
+| `OTEL_SERVICE_NAME` | `secctl` / app name | Service name shown in your backend |
+
+See [Observability](observability.md).
+
 ## Cache and rate limits
 
 | Setting | Default | Notes |

@@ -1,0 +1,20 @@
+{
+  "version": "2.0",
+  "telemetryMode": "OpenTelemetry",
+  "extensions": {
+    "mcp": {
+      "serverName": "secsdk",
+      "serverVersion": "0.1.0",
+      "instructions": "Read-only security data tools. Call secsdk_guide first, then secsdk_providers. Use secsdk_call for any operation; results are JSON envelopes - check ok and follow error.hint."
+    }
+  },
+  "logging": {
+    "logLevel": {
+      "default": "Information"
+    }
+  },
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle.Preview",
+    "version": "[4.*, 5.0.0)"
+  }
+}

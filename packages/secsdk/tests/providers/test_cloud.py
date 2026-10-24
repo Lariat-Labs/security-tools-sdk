@@ -148,3 +148,30 @@ def test_azure_not_configured_without_cli(client):
 def test_azure_presets_need_no_auth(client):
     presets = client.azure.presets()
     assert set(presets) == set(azure.QUERIES)
+
+
+def test_azure_managed_identity_used_inside_functions(client, monkeypatch):
+    """IDENTITY_ENDPOINT (set by Functions/App Service) switches on managed identity."""
+    import sys
+    import types
+
+    calls = {}
+
+    class FakeMI:
+        def __init__(self, client_id=None):
+            calls["client_id"] = client_id
+
+        def get_token(self, scope):
+            calls["scope"] = scope
+            return types.SimpleNamespace(token="MI-TOKEN", expires_on=9_999_999_999)
+
+    fake = types.ModuleType("azure.identity")
+    fake.ManagedIdentityCredential = FakeMI
+    monkeypatch.setitem(sys.modules, "azure.identity", fake)
+    monkeypatch.setattr("secsdk.providers.azure.importlib.util.find_spec", lambda name: object())
+    monkeypatch.setenv("IDENTITY_ENDPOINT", "http://localhost/msi")
+    monkeypatch.setenv("SECSDK_AZURE_MANAGED_IDENTITY_CLIENT_ID", "uami-123")
+
+    assert client.azure.auth_status().note == "auth method: managed_identity"
+    assert client.azure._headers() == {"Authorization": "Bearer MI-TOKEN"}
+    assert calls == {"client_id": "uami-123", "scope": "https://management.azure.com/.default"}

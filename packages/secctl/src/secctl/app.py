@@ -21,7 +21,7 @@ from typing import Any
 
 import click
 
-from secsdk import Client, CoreSettings, SecSDKError, default_registry
+from secsdk import Client, CoreSettings, SecSDKError, default_registry, telemetry
 from secsdk import __version__ as sdk_version
 from secsdk.result import Result
 from secsdk.tools import tool_definitions
@@ -170,6 +170,10 @@ def cli(
     """
     if env_file:
         load_env_file(env_file)
+    # Telemetry is off unless an exporter is configured in the environment
+    # (Application Insights, OTLP or a file). TRACEPARENT joins a parent's trace.
+    telemetry.configure(service_name=os.environ.get("OTEL_SERVICE_NAME", "secctl"))
+    telemetry.attach_env_context()
     ctx.obj = {"fmt": fmt, "compact": compact, "no_cache": no_cache, "client": None}
 
 
@@ -359,6 +363,20 @@ def doctor(ctx: click.Context, fmt: str | None, fields: str | None, compact: boo
         "python": sys.version.split()[0],
         "cache": {"enabled": s.cache_enabled, "dir": str(s.cache_dir)},
         "rate_limit": s.rate_limit,
+        "telemetry": {
+            "opentelemetry_installed": telemetry.AVAILABLE,
+            "enabled": telemetry.enabled(),
+            "exporter": (
+                "azure-monitor"
+                if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING")
+                else "otlp"
+                if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+                else "file"
+                if os.environ.get("SECSDK_TELEMETRY_FILE")
+                else None
+            ),
+            "capture_params": telemetry._capture_params(),
+        },
         "providers": {
             cls.name: client.provider(cls.name).auth_status().model_dump(exclude_none=True)
             for cls in client.registry.providers()

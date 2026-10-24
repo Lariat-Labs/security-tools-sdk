@@ -13,9 +13,10 @@ from typing import Any
 
 import httpx
 
+from . import telemetry
 from .cache import FileCache
 from .config import CoreSettings
-from .errors import AuthError, NotFoundError, RateLimitedError, UpstreamError
+from .errors import AuthError, NotFoundError, RateLimitedError, SecSDKError, UpstreamError
 from .ratelimit import RateLimiter
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -53,6 +54,41 @@ class HttpClient:
         ok_statuses: tuple[int, ...] = (200, 201, 202),
     ) -> httpx.Response:
         """Send a request and return the response, or raise a mapped SDK error."""
+        parsed = httpx.URL(url)
+        with telemetry.http_span(method.upper(), parsed.host, parsed.path) as span:
+            try:
+                return self._request(
+                    span,
+                    method,
+                    url,
+                    params=params,
+                    headers=headers,
+                    json_body=json_body,
+                    data=data,
+                    limiter=limiter,
+                    cache_ttl=cache_ttl,
+                    timeout=timeout,
+                    ok_statuses=ok_statuses,
+                )
+            except SecSDKError as exc:
+                span.fail(exc.code, exc)
+                raise
+
+    def _request(
+        self,
+        span: Any,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None,
+        headers: Mapping[str, str] | None,
+        json_body: Any,
+        data: Mapping[str, Any] | None,
+        limiter: RateLimiter | None,
+        cache_ttl: float | None,
+        timeout: float | None,
+        ok_statuses: tuple[int, ...],
+    ) -> httpx.Response:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         cache_key = None
         if cache_ttl and method.upper() == "GET":
@@ -60,11 +96,13 @@ class HttpClient:
             hit = self.cache.get(cache_key, cache_ttl)
             if hit:
                 status, body = hit
+                span.cache_hit, span.status = True, status
                 return httpx.Response(status, text=body, request=httpx.Request(method, url))
 
         last_exc: Exception | None = None
         resp: httpx.Response | None = None
         for attempt in range(self.settings.max_retries + 1):
+            span.retries = attempt
             if limiter and self.settings.rate_limit:
                 limiter.acquire()
             try:
@@ -84,6 +122,7 @@ class HttpClient:
                     continue
                 raise UpstreamError(f"Network error calling {_host(url)}: {exc}") from exc
 
+            span.status = resp.status_code
             if resp.status_code in RETRY_STATUSES and attempt < self.settings.max_retries:
                 time.sleep(_retry_after(resp) or _backoff(attempt))
                 continue

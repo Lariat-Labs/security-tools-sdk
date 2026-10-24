@@ -35,6 +35,24 @@ agent ──shell──▶ secctl (JSON envelope, exit codes) ──▶ secsdk (
 - **Grows by adding a file.** `secctl dev scaffold <name>` creates a provider, and
   the CLI, docs and tool schemas pick it up automatically.
 
+## Agent example
+
+`examples/` has a Claude API agent whose only tool is `secctl`. It follows written
+workflows and won't finish until the required commands have run:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+uv run python examples/agent/run_workflow.py cve-triage --input cves="CVE-2024-3400 CVE-2023-4966"
+```
+
+## Observability and Azure
+
+- **Telemetry:** OpenTelemetry traces and metrics for every operation and API call. Export
+  to Application Insights, any OTLP backend, or a JSONL file (`docs/observability.md`).
+- **Foundry agents:** `deploy/azure-functions/` hosts the SDK as a remote MCP server on
+  Azure Functions, and `deploy/foundry/create_agent.py` wires it to a Foundry agent
+  (`docs/deploy-azure.md`).
+
 ## Docs
 
 `uv run --group docs mkdocs serve`, then open <http://127.0.0.1:8000>. Start with

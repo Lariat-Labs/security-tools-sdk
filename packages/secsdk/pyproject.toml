@@ -12,6 +12,20 @@ dependencies = [
     "defusedxml>=0.7",
 ]
 
+[project.optional-dependencies]
+# Tracing/metrics hooks (API only; no-ops until an app configures an exporter).
+otel = ["opentelemetry-api>=1.27"]
+# Export to any OTLP backend / OpenTelemetry Collector, or to a JSON-lines file.
+otlp = [
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+]
+# Export to Azure Monitor / Application Insights.
+azure-monitor = ["opentelemetry-api>=1.27", "azure-monitor-opentelemetry>=1.6"]
+# Managed identity / DefaultAzureCredential for the azure provider.
+azure = ["azure-identity>=1.17"]
+
 # Third-party packages can add providers without touching this repo:
 #   [project.entry-points."secsdk.providers"]
 #   myprovider = "my_package.providers:MyProvider"
