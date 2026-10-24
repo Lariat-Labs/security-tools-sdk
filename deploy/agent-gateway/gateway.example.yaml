@@ -1,0 +1,69 @@
+# Agent gateway: who may use which agents, and how many tokens they get.
+#
+# This file is the single source of truth for limits. `render_policies.py` turns it
+# into the two APIM policies in policies/. Re-render and redeploy after every change:
+#
+#   uv run python deploy/agent-gateway/render_policies.py deploy/agent-gateway/gateway.example.yaml
+#
+# Group ids are Microsoft Entra group object ids. Groups must be assigned to the
+# "agent-gateway" enterprise application so they appear in users' tokens
+# (groupMembershipClaims = ApplicationGroup); see entra.sh.
+#
+# Token counts are prompt + completion tokens as reported by the model.
+
+# Front-door request limit: agent runs a user may start per minute.
+runs_per_minute: 10
+
+# Tiers decide each user's personal limits. A user's tier is the FIRST tier in this list
+# whose group they belong to, so list the most generous tier first. Users in no tier
+# group are refused (403 no_tier).
+tiers:
+  - name: power
+    group_id: 00000000-0000-0000-0000-00000000a002   # sg-agents-power
+    tokens_per_minute: 60000
+    tokens_per_day: 1500000
+    tokens_per_month: 20000000
+  - name: standard
+    group_id: 00000000-0000-0000-0000-00000000a001   # sg-agents-standard
+    tokens_per_minute: 20000
+    tokens_per_day: 300000
+    tokens_per_month: 4000000
+
+# Teams share a monthly pool (and are the unit for chargeback). A user's team is the
+# FIRST team whose group they belong to; users in none fall into default_team.
+teams:
+  - name: secops
+    group_id: 00000000-0000-0000-0000-00000000b001   # sg-team-secops
+    tokens_per_month: 60000000
+    cost_center: CC-1001
+  - name: it-ops
+    group_id: 00000000-0000-0000-0000-00000000b002   # sg-team-itops
+    tokens_per_month: 20000000
+    cost_center: CC-1002
+default_team:
+  name: unassigned
+  tokens_per_month: 5000000
+
+# Agents: membership of an agent's group grants access to it. Agent limits protect
+# shared capacity from one popular (or looping) agent. tokens_per_run is a hard
+# per-run backstop; the runtime stops earlier at the agent's own budget_tokens.
+agents:
+  - name: cve-triage
+    group_id: 00000000-0000-0000-0000-00000000c001   # sg-agent-cve-triage
+    deployments: [gpt-5-mini]
+    tokens_per_minute: 150000
+    tokens_per_day: 10000000
+    tokens_per_run: 300000
+  - name: threat-brief
+    group_id: 00000000-0000-0000-0000-00000000c002   # sg-agent-threat-brief
+    deployments: [gpt-5-mini]
+    tokens_per_minute: 100000
+    tokens_per_day: 5000000
+    tokens_per_run: 400000
+
+# Model deployments behind the gateway. tokens_per_minute is the gateway's ceiling for
+# all agent traffic to that deployment. Keep it at or below the TPM quota you were
+# granted for the Foundry deployment, leaving headroom for anything that calls it directly.
+deployments:
+  - name: gpt-5-mini
+    tokens_per_minute: 400000

@@ -34,3 +34,7 @@ deploy/azure-functions/.python_packages/
 
 # local secrets (direnv)
 .envrc
+
+# agent gateway: local parameter files and rendered policies for real environments
+deploy/agent-gateway/infra/*.local.bicepparam
+deploy/agent-gateway/build/
