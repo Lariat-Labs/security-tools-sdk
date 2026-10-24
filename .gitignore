@@ -38,3 +38,10 @@ deploy/azure-functions/.python_packages/
 # agent gateway: local parameter files and rendered policies for real environments
 deploy/agent-gateway/infra/*.local.bicepparam
 deploy/agent-gateway/build/
+
+# terraform: provider cache, state and real variable files (state contains secrets)
+deploy/agent-gateway/terraform/.terraform/
+deploy/agent-gateway/terraform/*.tfstate
+deploy/agent-gateway/terraform/*.tfstate.*
+deploy/agent-gateway/terraform/*.tfvars
+deploy/agent-gateway/terraform/*.tfplan

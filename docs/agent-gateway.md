@@ -581,10 +581,14 @@ model deployments, Event Hubs, Container Registry, a Container Apps environment 
 runtime app with Entra-only ingress auth, the *Agent gateway* workbook, APIM LLM logs
 (token counts only), plus the role assignments.
 
-**Terraform instead of Bicep** works too: the `azurerm` provider covers nearly all of these
-resources, `azapi` covers the rest (for example the Container Apps auth config and APIM's
-LLM logging setting), and `azuread` can replace `entra.sh`. The rendered policy XML is
-used the same way.
+**Terraform.** [`terraform/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/terraform)
+is the equivalent of the Bicep **and** `entra.sh` in one root module: `azurerm` for most
+resources, `azuread` for the app registrations, scopes, roles, grants and federated
+credentials, and `azapi` where azurerm can't do exactly what's needed (policies sent as
+`xml`, Container Apps auth, APIM LLM logging, the Foundry App Insights connection, the
+secretless Bot OAuth connection). Two applies: the first creates everything except the
+containers, the second adds them once images are in the registry. It passes `terraform
+validate` and a full `terraform plan` (84 resources); the pilot itself was deployed with Bicep.
 
 ## Decisions and alternatives
 
