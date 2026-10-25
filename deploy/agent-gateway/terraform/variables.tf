@@ -155,3 +155,9 @@ variable "copilot_studio_redirect_uris" {
   type        = list(string)
   default     = ["https://global.consent.azure-apim.net/redirect"]
 }
+
+variable "foundry_users" {
+  description = "Object IDs of users or groups who work in the Foundry portal for this gateway (agent Monitor, Insights scans, evaluations). They get Foundry User on the AI Services account; the identity running Terraform always does."
+  type        = list(string)
+  default     = []
+}

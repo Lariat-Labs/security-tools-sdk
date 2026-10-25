@@ -75,3 +75,13 @@ resource "azapi_resource" "foundry_appinsights" {
   }
   depends_on = [azurerm_cognitive_account_project.agents]
 }
+
+# Foundry's portal runs Insights scans and evaluations with gpt-5-mini as the signed-in person,
+# which needs model inference on the account. Foundry User (formerly Azure AI User) grants it
+# by role id, since the display name changed.
+resource "azurerm_role_assignment" "foundry_users" {
+  for_each           = toset(concat([data.azurerm_client_config.current.object_id], var.foundry_users))
+  scope              = azurerm_cognitive_account.foundry.id
+  role_definition_id = "/subscriptions/${var.subscription_id}/providers/Microsoft.Authorization/roleDefinitions/53ca6127-db72-4b80-b1b0-d745d6d5456d"
+  principal_id       = each.value
+}
