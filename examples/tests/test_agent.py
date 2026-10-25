@@ -235,3 +235,139 @@ def test_tracing_links_agent_model_and_secctl_spans(tmp_path, monkeypatch):
     assert child and all(
         c["context"]["trace_id"] == f"0x{agent.context.trace_id:032x}" for c in child
     )
+
+
+# ----- Azure AI Foundry backend ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("https://res.openai.azure.com", "https://res.openai.azure.com/openai/v1"),
+        ("https://res.openai.azure.com/", "https://res.openai.azure.com/openai/v1"),
+        (
+            "https://res.services.ai.azure.com/openai/v1/",
+            "https://res.services.ai.azure.com/openai/v1",
+        ),
+        (
+            "https://res.cognitiveservices.azure.com/openai",
+            "https://res.cognitiveservices.azure.com/openai/v1",
+        ),
+        (
+            "https://res.services.ai.azure.com/api/projects/p1",
+            "https://res.services.ai.azure.com/openai/v1",
+        ),
+    ],
+)
+def test_foundry_base_url(endpoint, expected):
+    assert sa.foundry_base_url(endpoint) == expected
+
+
+def test_foundry_base_url_rejects_plain_http():
+    with pytest.raises(ValueError):
+        sa.foundry_base_url("http://res.openai.azure.com")
+
+
+def _completion(finish, content=None, calls=(), cached=0):
+    tool_calls = [
+        SimpleNamespace(
+            id=cid,
+            type="function",
+            function=SimpleNamespace(name="secctl", arguments=arguments),
+        )
+        for cid, arguments in calls
+    ]
+    return SimpleNamespace(
+        model="gpt-test",
+        choices=[
+            SimpleNamespace(
+                finish_reason=finish,
+                message=SimpleNamespace(
+                    content=content, tool_calls=tool_calls or None, refusal=None
+                ),
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=10,
+            completion_tokens=5,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached),
+        ),
+    )
+
+
+def _call(cid, *args):
+    import json
+
+    return cid, json.dumps({"args": list(args), "reason": "test"})
+
+
+class FakeOpenAI:
+    """Plays back scripted Chat Completions and records every request."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.requests.append({**kwargs, "messages": [dict(m) for m in kwargs["messages"]]})
+        return self.responses.pop(0)
+
+
+def test_foundry_loop_runs_tools_and_nudges():
+    wf = sa.Workflow(name="t", description="", directions="go", required=["ops", "describe"])
+    client = FakeOpenAI(
+        [
+            _completion("tool_calls", "Listing ops.", [_call("c1", "ops", "kev", "--compact")]),
+            _completion("stop", "Report without describe"),
+            _completion("tool_calls", None, [_call("c2", "describe", "kev.lookup", "--compact")]),
+            _completion("stop", "# Final report", cached=8),
+        ]
+    )
+    backend = sa.FoundryBackend("sys", client, model="my-deployment")
+    result = sa.SecctlAgent(backend=backend, verbose=False).run(wf, {})
+
+    assert result.stop == "complete" and result.report == "# Final report"
+    assert [r.args[0] for r in result.commands] == ["ops", "describe"]
+    assert result.usage == {"input_tokens": 40, "output_tokens": 20, "cache_read_input_tokens": 8}
+    req = client.requests[0]
+    assert req["model"] == "my-deployment" and "reasoning_effort" not in req
+    assert req["messages"][0] == {"role": "system", "content": "sys"}
+    tool = req["tools"][0]["function"]
+    assert tool["name"] == "secctl" and tool["strict"] is True
+    assert tool["parameters"] == sa.SECCTL_TOOL["input_schema"]
+    # The tool call was echoed back, followed by its result as a `tool` message.
+    second = client.requests[1]["messages"]
+    assert second[2]["tool_calls"][0]["id"] == "c1"
+    assert second[3]["role"] == "tool" and second[3]["tool_call_id"] == "c1"
+    assert second[3]["content"].startswith("exit_code: 0")
+    assert "secctl describe" in client.requests[2]["messages"][5]["content"]  # the nudge
+    for earlier, later in zip(client.requests, client.requests[1:], strict=False):
+        assert later["messages"][: len(earlier["messages"])] == earlier["messages"]
+
+
+def test_foundry_bad_arguments_and_blocked_commands_go_back_as_errors():
+    wf = sa.Workflow(name="t", description="", directions="go")
+    client = FakeOpenAI(
+        [
+            _completion(
+                "tool_calls", None, [("c1", "not json"), _call("c2", "dev", "scaffold", "x")]
+            ),
+            _completion("stop", "done"),
+        ]
+    )
+    backend = sa.FoundryBackend("sys", client, model="d", effort="low")
+    result = sa.SecctlAgent(backend=backend, verbose=False).run(wf, {})
+    assert result.stop == "complete" and all(r.blocked for r in result.commands)
+    results = [m for m in client.requests[1]["messages"] if m["role"] == "tool"]
+    assert all(m["content"].startswith("[error] Command not run") for m in results)
+    assert client.requests[0]["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize(
+    ("finish", "stop"), [("content_filter", "refusal"), ("length", "max_tokens")]
+)
+def test_foundry_stops_cleanly(finish, stop):
+    wf = sa.Workflow(name="t", description="", directions="go")
+    backend = sa.FoundryBackend("sys", FakeOpenAI([_completion(finish, "partial")]), model="d")
+    assert sa.SecctlAgent(backend=backend, verbose=False).run(wf, {}).stop == stop

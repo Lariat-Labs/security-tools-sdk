@@ -32,6 +32,8 @@ docs = [
 ]
 examples = [
     "anthropic>=2.3.0",
+    "azure-identity>=1.26.0",
+    "openai>=3.37.0",
     "pyyaml>=6.0.3",
 ]
 gateway = [

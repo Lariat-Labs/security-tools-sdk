@@ -1,8 +1,10 @@
-# Examples: a Claude agent that works through `secctl`
+# Examples: an agent that works through `secctl`
 
 A small agent that follows a written **workflow** and gets every fact from the
 `secctl` CLI. It has exactly one tool, `secctl`, so it cannot browse, run shell
 commands or import the SDK. Every command it runs is logged, so you can re-run it yourself.
+The model is Claude (Anthropic API) by default, or any chat model you've deployed in
+Azure AI Foundry; see [Use a Foundry model](#use-a-foundry-model).
 
 ```text
 examples/
@@ -20,7 +22,7 @@ examples/
 ## Run it
 
 ```bash
-uv sync                                   # installs the `examples` group (anthropic, pyyaml)
+uv sync                                   # installs the `examples` group (anthropic, openai, azure-identity, pyyaml)
 export ANTHROPIC_API_KEY=sk-ant-...       # or: ant auth login
 
 uv run python examples/agent/run_workflow.py --list
@@ -46,8 +48,48 @@ While it runs, each command the agent issues is printed to stderr with its reaso
 The final Markdown report is printed to stdout and saved to `examples/output/` next to a
 `.commands.json` log (every command, its reason, exit code, timing and token usage).
 
-Options: `--model` (default `claude-opus-5-5`), `--effort low|medium|high|xhigh|max`
-(default `high`), `--out DIR`, `--quiet`.
+Options: `--provider anthropic|foundry` (default `anthropic`, or `SECCTL_AGENT_PROVIDER`),
+`--model` (default `claude-opus-5-5`; for Foundry, the deployment name), `--effort`
+(Claude: `low|medium|high|xhigh|max`, default `high`), `--out DIR`, `--quiet`.
+
+## Use a Foundry model
+
+`--provider foundry` sends the same loop to a model deployment in Azure AI Foundry through
+its OpenAI-compatible v1 API (Chat Completions). That covers Azure OpenAI deployments
+(GPT, o-series) and other Foundry models served from the same resource that support tool calling.
+
+```bash
+az login                                  # Entra ID; or export FOUNDRY_API_KEY=...
+export FOUNDRY_ENDPOINT="https://<resource>.openai.azure.com"
+export FOUNDRY_MODEL="<deployment name>"  # e.g. gpt-5-mini
+
+uv run python examples/agent/run_workflow.py cve-triage --provider foundry \
+  --input cves="CVE-2024-3400 CVE-2023-4966"
+```
+
+- `FOUNDRY_ENDPOINT` takes the resource endpoint (`*.openai.azure.com`,
+  `*.services.ai.azure.com`, `*.cognitiveservices.azure.com`) or a Foundry project
+  endpoint (`.../api/projects/<name>`); `/openai/v1` is added for you. `--endpoint` overrides it.
+- With Entra ID you need an inference role on the resource: **Foundry User** (which the
+  agent gateway's Terraform grants to `foundry_users`) or **Cognitive Services OpenAI User**.
+- `--effort minimal|low|medium|high|xhigh` is sent as `reasoning_effort`, for reasoning
+  models only. It is left out by default because other models reject it.
+- Claude-only features don't apply: no server-side fallbacks and no explicit cache
+  breakpoints (Azure caches long prompt prefixes automatically and the usage line still
+  reports cached tokens). Azure's content filter ending a turn is reported as `refusal`.
+- The tool is sent with `strict: true`. If a non-OpenAI model rejects that, set
+  `"strict": False` in `SECCTL_TOOL`.
+
+To use it from Python, pass a backend:
+
+```python
+from secctl_agent import FoundryBackend, SecctlAgent, Workflow, system_prompt
+
+backend = FoundryBackend(
+    system_prompt(), model="gpt-5-mini", endpoint="https://<resource>.openai.azure.com"
+)
+result = SecctlAgent(backend=backend).run(Workflow.load("threat-brief"), {"days": "2"})
+```
 
 ## How the CLI requirement is enforced
 
@@ -99,13 +141,16 @@ checks that every workflow loads and renders.
 
 ## Model and API notes
 
-- Uses the Anthropic Python SDK with a hand-written tool-use loop. The SDK's tool runner
-  can't refuse a final answer until required commands have run, so the loop is written out.
+- Uses a hand-written tool-use loop. An SDK tool runner can't refuse a final answer until
+  required commands have run, so the loop is written out. Each provider is a small backend
+  (`AnthropicBackend`, `FoundryBackend`) that owns the history in its API's format; the loop
+  and the required-step check are shared.
+- The notes below are for the default Anthropic backend.
 - Default model `claude-opus-5-5`. Thinking is adaptive and always on; `--effort` controls depth.
 - `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) is enabled. If a safety
   classifier declines part of a request (security topics can trigger the cyber classifier),
   the API continues on a fallback model in the same call, and the runner prints `[fallback]`.
-  Remove those two lines in `SecctlAgent._create` to turn it off.
+  Remove those two lines in `AnthropicBackend.step` to turn it off.
 - The system prompt (including `AGENTS.md`) is stable and marked for prompt caching, so later
   turns read it from cache. The usage line at the end shows how many tokens were cached.
 - Conversation history is only ever appended to, never edited, as preserved thinking requires.
