@@ -37,8 +37,9 @@ agent ──shell──▶ secctl (JSON envelope, exit codes) ──▶ secsdk (
 
 ## Agent example
 
-`examples/` has a Claude API agent whose only tool is `secctl`. It follows written
-workflows and won't finish until the required commands have run:
+`examples/` has an agent whose only tool is `secctl`, running on Claude (default) or a
+model deployed in Azure AI Foundry (`--provider foundry`). It follows written workflows
+and won't finish until the required commands have run:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...

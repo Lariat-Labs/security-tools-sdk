@@ -1,11 +1,14 @@
-"""A small Claude agent whose only tool is the `secctl` CLI.
+"""A small agent whose only tool is the `secctl` CLI.
+
+The model is Claude through the Anthropic API by default, or a model deployment in
+Azure AI Foundry (``FoundryBackend``); the loop and its rules are the same for both.
 
 The agent follows a written workflow (a Markdown file in ``examples/workflows/``).
 It cannot reach security data any other way: no web access, no shell, no SDK
 import. Everything it learns comes from `secctl` output, and every command it
 runs is recorded so a person can re-run it.
 
-The loop is written by hand rather than with the SDK's tool runner because it
+The loop is written by hand rather than with an SDK's tool runner because it
 enforces one rule the runner cannot: a final answer is not accepted until the
 workflow's required `secctl` commands have actually been run.
 """
@@ -304,7 +307,7 @@ class Workflow:
         ]
 
 
-# ----- the agent loop ----------------------------------------------------------------------
+# ----- the system prompt -------------------------------------------------------------------
 
 
 SYSTEM_PROMPT_HEADER = """\
@@ -326,64 +329,85 @@ The repository's usage rules for agents (AGENTS.md) follow.
 """
 
 
+# ----- model backends ----------------------------------------------------------------------
+#
+# Each backend speaks one provider's API and owns the conversation history in that API's
+# format. The loop in SecctlAgent only sees the provider-neutral Turn.
+
+PROVIDERS = ("anthropic", "foundry")
+
+
 @dataclass
-class RunResult:
-    report: str
-    commands: list[CommandRecord]
-    stop: str
-    turns: int
-    usage: dict[str, int]
+class ToolCall:
+    id: str
+    args: Any
+    reason: str
 
 
-class SecctlAgent:
+@dataclass
+class Turn:
+    """One model response, reduced to what the loop needs."""
+
+    stop: str  # tool_use | end_turn | max_tokens | refusal | pause_turn
+    text: str
+    tool_calls: list[ToolCall]
+    usage: dict[str, int]  # input_tokens, output_tokens, cache_read_input_tokens
+    finish_reason: str  # the provider's own stop/finish reason, for telemetry
+    response_model: str | None = None
+    refusal: str | None = None  # why, when stop == "refusal"
+    notes: list[str] = field(default_factory=list)  # e.g. server-side fallbacks
+
+
+class ModelBackend:
+    provider: str  # OpenTelemetry gen_ai.provider.name
+    model: str
+
+    def add_user(self, text: str) -> None:
+        raise NotImplementedError
+
+    def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None:
+        """Results as (tool_call_id, text, is_error), all for the previous turn."""
+        raise NotImplementedError
+
+    def step(self) -> Turn:
+        """Call the model on the history so far and append its reply to the history."""
+        raise NotImplementedError
+
+
+class AnthropicBackend(ModelBackend):
+    """Claude through the Anthropic Messages API (the default)."""
+
+    provider = "anthropic"
+
     def __init__(
-        self,
-        client: anthropic.Anthropic | None = None,
-        model: str = DEFAULT_MODEL,
-        effort: str = "high",
-        verbose: bool = True,
+        self, system_text: str, client: Any = None, model: str = DEFAULT_MODEL, effort: str = "high"
     ) -> None:
-        self.client = client or anthropic.Anthropic()
+        self.client: Any = client or anthropic.Anthropic()
         self.model = model
         self.effort = effort
-        self.verbose = verbose
-        agents_md = (REPO_ROOT / "AGENTS.md").read_text()
         # Stable system prompt (no timestamps) so it is cached across turns.
         self.system = [
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT_HEADER + agents_md,
-                "cache_control": {"type": "ephemeral"},
-            }
+            {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}
         ]
+        self.messages: list[dict[str, Any]] = []
 
-    def log(self, msg: str) -> None:
-        if self.verbose:
-            print(msg, file=sys.stderr, flush=True)
+    def add_user(self, text: str) -> None:
+        self.messages.append({"role": "user", "content": text})
 
-    def _create(self, messages: list[dict[str, Any]]) -> Any:
-        with _span(
-            f"chat {self.model}",
-            **{
-                "gen_ai.operation.name": "chat",
-                "gen_ai.provider.name": "anthropic",
-                "gen_ai.request.model": self.model,
-            },
-        ) as span:
-            response = self._call_model(messages)
-            _set(
-                span,
-                **{
-                    "gen_ai.response.model": getattr(response, "model", None),
-                    "gen_ai.response.finish_reasons": [str(response.stop_reason)],
-                    "gen_ai.usage.input_tokens": getattr(response.usage, "input_tokens", None),
-                    "gen_ai.usage.output_tokens": getattr(response.usage, "output_tokens", None),
-                },
-            )
-            return response
+    def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None:
+        # All results for one turn go back in one user message.
+        self.messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": tid, "content": text, "is_error": err}
+                    for tid, text, err in results
+                ],
+            }
+        )
 
-    def _call_model(self, messages: list[dict[str, Any]]) -> Any:
-        return self.client.beta.messages.create(
+    def step(self) -> Turn:
+        response = self.client.beta.messages.create(
             model=self.model,
             max_tokens=16000,
             # Thinking is adaptive by default on Claude Opus 5.5; effort sets how hard it works.
@@ -394,8 +418,255 @@ class SecctlAgent:
             fallbacks="default",
             system=self.system,
             tools=[SECCTL_TOOL],
-            messages=messages,
+            messages=self.messages,
         )
+        # Append the assistant turn exactly as returned (history is append-only).
+        self.messages.append({"role": "assistant", "content": response.content})
+
+        notes = [
+            f"[fallback] {b.from_.model} declined; {b.to.model} continued"
+            for b in response.content
+            if b.type == "fallback"
+        ]
+        refusal = None
+        if response.stop_reason == "refusal":
+            d = response.stop_details
+            refusal = f"{d.category}: {d.explanation}" if d else "no details"
+        tool_calls = [
+            ToolCall(b.id, b.input.get("args", []), b.input.get("reason", ""))
+            for b in response.content
+            if b.type == "tool_use"
+        ]
+        stop = str(response.stop_reason)
+        if stop not in ("refusal", "max_tokens", "pause_turn"):
+            stop = "tool_use" if tool_calls else "end_turn"
+        return Turn(
+            stop=stop,
+            text="\n".join(b.text for b in response.content if b.type == "text").strip(),
+            tool_calls=tool_calls,
+            usage={
+                k: getattr(response.usage, k, 0) or 0
+                for k in ("input_tokens", "output_tokens", "cache_read_input_tokens")
+            },
+            finish_reason=str(response.stop_reason),
+            response_model=getattr(response, "model", None),
+            refusal=refusal,
+            notes=notes,
+        )
+
+
+FOUNDRY_SCOPE = "https://cognitiveservices.azure.com/.default"
+
+
+def foundry_base_url(endpoint: str) -> str:
+    """The OpenAI-compatible v1 base URL for a Foundry (AI Services / Azure OpenAI) endpoint.
+
+    Accepts the resource endpoint (``https://<res>.openai.azure.com``,
+    ``https://<res>.services.ai.azure.com``, ``https://<res>.cognitiveservices.azure.com``),
+    a Foundry project endpoint (``.../api/projects/<project>``) or the v1 URL itself.
+    """
+    url = endpoint.strip().rstrip("/")
+    if not url.startswith("https://"):
+        raise ValueError(f"Foundry endpoint must start with https://, got {endpoint!r}")
+    url = url.split("/api/projects/", 1)[0]
+    if url.endswith("/openai/v1"):
+        return url
+    if url.endswith("/openai"):
+        return url + "/v1"
+    return url + "/openai/v1"
+
+
+def _openai_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    """An Anthropic tool definition as a Chat Completions function tool."""
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["input_schema"],
+            "strict": tool.get("strict", False),
+        },
+    }
+
+
+class FoundryBackend(ModelBackend):
+    """A model deployment in Azure AI Foundry, through its OpenAI-compatible v1 API.
+
+    Works for Azure OpenAI deployments (GPT, o-series) and other Foundry models served
+    on the same endpoint. ``model`` is the deployment name. Authenticates with Entra ID
+    (``az login``, managed identity, ...) unless an API key is given.
+    """
+
+    provider = "azure.ai.openai"
+
+    def __init__(
+        self,
+        system_text: str,
+        client: Any = None,
+        *,
+        model: str,
+        endpoint: str | None = None,
+        api_key: str | None = None,
+        effort: str | None = None,
+    ) -> None:
+        token: Any = api_key  # a key, or a callable returning a fresh Entra token
+        if client is None:
+            from openai import OpenAI
+
+            if not endpoint:
+                raise ValueError("Foundry needs an endpoint (--endpoint or FOUNDRY_ENDPOINT)")
+            if not token:
+                from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+
+                token = get_bearer_token_provider(DefaultAzureCredential(), FOUNDRY_SCOPE)
+            client = OpenAI(base_url=foundry_base_url(endpoint), api_key=token)
+        self.client = client
+        self.model = model
+        self.effort = (
+            effort  # reasoning_effort; only sent when set (non-reasoning models reject it)
+        )
+        self.tools = [_openai_tool(SECCTL_TOOL)]
+        # Stable prefix: Azure OpenAI caches long prompts automatically.
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_text}]
+
+    def add_user(self, text: str) -> None:
+        self.messages.append({"role": "user", "content": text})
+
+    def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None:
+        for tid, text, err in results:
+            content = f"[error] {text}" if err else text
+            self.messages.append({"role": "tool", "tool_call_id": tid, "content": content})
+
+    def step(self) -> Turn:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self.messages,
+            "tools": self.tools,
+            "max_completion_tokens": 16000,
+        }
+        if self.effort:
+            kwargs["reasoning_effort"] = self.effort
+        completion = self.client.chat.completions.create(**kwargs)
+        choice = completion.choices[0]
+        reply = choice.message
+
+        # Only the fields the API accepts back in the history.
+        message: dict[str, Any] = {"role": "assistant", "content": reply.content}
+        tool_calls: list[ToolCall] = []
+        if reply.tool_calls:
+            message["tool_calls"] = []
+            for call in reply.tool_calls:
+                if call.type != "function":
+                    continue
+                message["tool_calls"].append(
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.function.name,
+                            "arguments": call.function.arguments,
+                        },
+                    }
+                )
+                try:
+                    data = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+                # Bad arguments reach check_args, which tells the model what's wrong.
+                tool_calls.append(ToolCall(call.id, data.get("args"), str(data.get("reason", ""))))
+        self.messages.append(message)
+
+        finish = str(choice.finish_reason)
+        refusal = getattr(reply, "refusal", None)
+        if tool_calls:
+            stop = "tool_use"
+        elif finish == "content_filter" or refusal:
+            stop = "refusal"
+            refusal = refusal or "Azure content filter"
+        elif finish == "length":
+            stop = "max_tokens"
+        else:
+            stop = "end_turn"
+
+        u = completion.usage
+        cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) if u else 0
+        return Turn(
+            stop=stop,
+            text=(reply.content or "").strip(),
+            tool_calls=tool_calls,
+            usage={
+                "input_tokens": (u.prompt_tokens if u else 0) or 0,
+                "output_tokens": (u.completion_tokens if u else 0) or 0,
+                "cache_read_input_tokens": cached or 0,
+            },
+            finish_reason=finish,
+            response_model=getattr(completion, "model", None),
+            refusal=refusal,
+        )
+
+
+def system_prompt() -> str:
+    return SYSTEM_PROMPT_HEADER + (REPO_ROOT / "AGENTS.md").read_text()
+
+
+# ----- the agent loop ----------------------------------------------------------------------
+
+
+@dataclass
+class RunResult:
+    report: str
+    commands: list[CommandRecord]
+    stop: str
+    turns: int
+    usage: dict[str, int]
+
+
+class SecctlAgent:
+    """Runs a workflow against a model backend (Claude by default).
+
+    ``client`` is an Anthropic client for the default backend; pass ``backend`` to use
+    another provider, e.g. ``FoundryBackend(system_prompt(), model="gpt-5", endpoint=...)``.
+    Backends keep history, so use a new agent (and backend) per run.
+    """
+
+    def __init__(
+        self,
+        client: anthropic.Anthropic | None = None,
+        model: str = DEFAULT_MODEL,
+        effort: str = "high",
+        verbose: bool = True,
+        backend: ModelBackend | None = None,
+    ) -> None:
+        self.backend = backend or AnthropicBackend(system_prompt(), client, model, effort)
+        self.model = self.backend.model
+        self.verbose = verbose
+
+    def log(self, msg: str) -> None:
+        if self.verbose:
+            print(msg, file=sys.stderr, flush=True)
+
+    def _step(self) -> Turn:
+        with _span(
+            f"chat {self.model}",
+            **{
+                "gen_ai.operation.name": "chat",
+                "gen_ai.provider.name": self.backend.provider,
+                "gen_ai.request.model": self.model,
+            },
+        ) as span:
+            turn = self.backend.step()
+            _set(
+                span,
+                **{
+                    "gen_ai.response.model": turn.response_model,
+                    "gen_ai.response.finish_reasons": [turn.finish_reason],
+                    "gen_ai.usage.input_tokens": turn.usage["input_tokens"],
+                    "gen_ai.usage.output_tokens": turn.usage["output_tokens"],
+                },
+            )
+            return turn
 
     def run(self, workflow: Workflow, inputs: dict[str, str], max_nudges: int = 2) -> RunResult:
         with _span(
@@ -403,6 +674,7 @@ class SecctlAgent:
             **{
                 "gen_ai.operation.name": "invoke_agent",
                 "gen_ai.agent.name": workflow.name,
+                "gen_ai.provider.name": self.backend.provider,
                 "gen_ai.request.model": self.model,
             },
         ) as span:
@@ -421,74 +693,46 @@ class SecctlAgent:
 
     def _run(self, workflow: Workflow, inputs: dict[str, str], max_nudges: int) -> RunResult:
         directions = workflow.render(inputs)
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": (
-                    f"# Workflow: {workflow.name}\n\n{directions}\n\n"
-                    "Begin with step 1. Use the secctl tool for every step that needs data."
-                ),
-            }
-        ]
+        self.backend.add_user(
+            f"# Workflow: {workflow.name}\n\n{directions}\n\n"
+            "Begin with step 1. Use the secctl tool for every step that needs data."
+        )
         records: list[CommandRecord] = []
         usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}
         nudges = 0
-        response = None
+        turn: Turn | None = None
 
-        for turn in range(1, workflow.max_turns + 1):
-            response = self._create(messages)
+        for n in range(1, workflow.max_turns + 1):
+            turn = self._step()
             for k in usage:
-                usage[k] += getattr(response.usage, k, 0) or 0
-            # Append the assistant turn exactly as returned (history is append-only).
-            messages.append({"role": "assistant", "content": response.content})
+                usage[k] += turn.usage.get(k, 0)
+            for note in turn.notes:
+                self.log(f"  {note}")
 
-            for block in response.content:
-                if block.type == "fallback":
-                    self.log(
-                        f"  [fallback] {block.from_.model} declined; {block.to.model} continued"
-                    )
-
-            if response.stop_reason == "refusal":
-                details = response.stop_details
-                why = f"{details.category}: {details.explanation}" if details else "no details"
+            if turn.stop == "refusal":
                 return RunResult(
-                    f"Model declined the request ({why}).", records, "refusal", turn, usage
+                    f"Model declined the request ({turn.refusal}).", records, "refusal", n, usage
                 )
 
-            if response.stop_reason == "max_tokens":
+            if turn.stop == "max_tokens":
                 return RunResult(
-                    _text(response) + "\n\n[stopped: max_tokens]",
-                    records,
-                    "max_tokens",
-                    turn,
-                    usage,
+                    turn.text + "\n\n[stopped: max_tokens]", records, "max_tokens", n, usage
                 )
 
-            if response.stop_reason == "pause_turn":
+            if turn.stop == "pause_turn":
                 continue
 
-            tool_uses = [b for b in response.content if b.type == "tool_use"]
-            if tool_uses:
+            if turn.tool_calls:
                 results = []
-                for tu in tool_uses:
-                    args = tu.input.get("args", [])
-                    reason = tu.input.get("reason", "")
-                    text, is_error, rec = run_secctl(args, reason)
+                for call in turn.tool_calls:
+                    text, is_error, rec = run_secctl(call.args, call.reason)
                     records.append(rec)
                     status = rec.blocked or f"exit {rec.exit_code}, {rec.seconds}s"
                     self.log(f"  $ {rec.display}   ({status})")
-                    if reason:
-                        self.log(f"    ↳ {reason}")
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tu.id,
-                            "content": text,
-                            "is_error": is_error,
-                        }
-                    )
-                # All results for this turn go back in one user message.
-                messages.append({"role": "user", "content": results})
+                    if call.reason:
+                        self.log(f"    ↳ {call.reason}")
+                    results.append((call.id, text, is_error))
+                self.backend.add_tool_results(results)
                 continue
 
             # end_turn with no tool calls: accept only if the required steps were run.
@@ -498,29 +742,22 @@ class SecctlAgent:
                 self.log(
                     f"  [check] required steps not run yet: {', '.join(missing)}. Asking the agent to finish them."
                 )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "The workflow is not complete. These required secctl commands have not been run: "
-                            + ", ".join(f"`secctl {m}`" for m in missing)
-                            + ". Run them (or explain from secctl output why they cannot run), then write the full report again."
-                        ),
-                    }
+                self.backend.add_user(
+                    "The workflow is not complete. These required secctl commands have not been run: "
+                    + ", ".join(f"`secctl {m}`" for m in missing)
+                    + ". Run them (or explain from secctl output why they cannot run), then write the full report again."
                 )
                 continue
 
-            report = _text(response)
+            report = turn.text
             if missing:
                 report += (
                     "\n\n> Note: workflow finished without these required commands: "
                     + ", ".join(missing)
                 )
-            return RunResult(
-                report, records, "complete" if not missing else "incomplete", turn, usage
-            )
+            return RunResult(report, records, "complete" if not missing else "incomplete", n, usage)
 
-        last = _text(response) if response is not None else ""
+        last = turn.text if turn is not None else ""
         return RunResult(
             last + "\n\n[stopped: reached max_turns]",
             records,
@@ -528,7 +765,3 @@ class SecctlAgent:
             workflow.max_turns,
             usage,
         )
-
-
-def _text(response: Any) -> str:
-    return "\n".join(b.text for b in response.content if b.type == "text").strip()

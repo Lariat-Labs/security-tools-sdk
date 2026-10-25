@@ -46,7 +46,7 @@ let the host application configure OpenTelemetry.
 | `secsdk <provider>.<operation>` | internal | `secsdk.operation`, `secsdk.provider`, `secsdk.params` (names only), `secsdk.outcome` (`ok` or error code), `secsdk.result.count`, `error.type` |
 | `<METHOD> <host>` | client | `http.request.method`, `server.address`, `url.path`, `http.response.status_code`, `http.request.resend_count`, `secsdk.cache_hit` |
 | `invoke_agent <workflow>` (agent example) | internal | `gen_ai.agent.name`, `gen_ai.request.model`, `gen_ai.usage.*`, `secctl_agent.stop`, `secctl_agent.commands` |
-| `chat <model>` (agent example) | internal | `gen_ai.provider.name`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens/output_tokens` |
+| `chat <model>` (agent example) | internal | `gen_ai.provider.name` (`anthropic` or `azure.ai.openai`), `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens/output_tokens` |
 | `execute_tool secctl` (agent example) | internal | `gen_ai.tool.name`, `secctl.command`, `secctl.exit_code`, `secctl.blocked` |
 
 Composite operations nest: `intel.cve_priority` contains `kev`, `epss` and `nvd` spans.

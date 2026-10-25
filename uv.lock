@@ -2991,6 +2991,8 @@ docs = [
 ]
 examples = [
     { name = "anthropic" },
+    { name = "azure-identity" },
+    { name = "openai" },
     { name = "pyyaml" },
 ]
 gateway = [
@@ -3025,6 +3027,8 @@ docs = [
 ]
 examples = [
     { name = "anthropic", specifier = ">=2.3.0" },
+    { name = "azure-identity", specifier = ">=1.26.0" },
+    { name = "openai", specifier = ">=3.37.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 gateway = [
