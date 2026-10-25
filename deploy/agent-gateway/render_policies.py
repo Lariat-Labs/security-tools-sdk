@@ -438,7 +438,20 @@ def render_agents_api(cfg: GatewayConfig) -> str:
         # Replaces the user's token: the runtime only accepts the gateway's identity.
         '<authentication-managed-identity resource="api://{{agw-gateway-app-id}}" client-id="{{agw-apim-client-id}}" />',
     ]
-    return _policies(inbound, [])
+    # The A2A agent card is public (clients such as Copilot Studio read it before anyone signs
+    # in) and carries only the agent's name, description and skills. Its operation skips user
+    # validation; every other operation, including A2A messages, gets the full checks above.
+    card_branch = "\n".join(
+        [
+            '<set-backend-service backend-id="agw-runtime" />',
+            '<authentication-managed-identity resource="api://{{agw-gateway-app-id}}" client-id="{{agw-apim-client-id}}" />',
+        ]
+    )
+    gated = _choose(
+        [_when(_expr("context.Operation.Id == " + Q + "a2a-card" + Q), card_branch)],
+        "\n".join(inbound),
+    )
+    return _policies([gated], [])
 
 
 # ----- the model route: agent runtime -> models -------------------------------------------------

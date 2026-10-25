@@ -143,3 +143,15 @@ variable "tags" {
   type    = map(string)
   default = { workload = "agent-gateway" }
 }
+
+variable "enable_copilot_studio" {
+  description = "Create the OAuth client app Copilot Studio's A2A connection signs users in with."
+  type        = bool
+  default     = false
+}
+
+variable "copilot_studio_redirect_uris" {
+  description = "Redirect URIs for the Copilot Studio OAuth client; add the one Copilot Studio shows when you create the connection."
+  type        = list(string)
+  default     = ["https://global.consent.azure-apim.net/redirect"]
+}

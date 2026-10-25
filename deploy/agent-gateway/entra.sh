@@ -10,6 +10,9 @@
 #                                          add the redirect URI and trust the chat's managed identity
 #   ./entra.sh teams <gateway-app-id> <bot-mi-principal-id>
 #                                          create the "agent-gateway-teams" bot app (Teams SSO, OBO)
+#   ./entra.sh copilot-studio <gateway-app-id>
+#                                          create the "agent-gateway-copilot-studio" OAuth client
+#                                          for Copilot Studio's A2A connection
 #
 # Needs: az login as an Application Administrator (or Cloud Application Administrator).
 # Assigning groups to an application needs Microsoft Entra ID P1 or P2.
@@ -209,12 +212,32 @@ cmd_teams() {
   echo "teamsSsoUniqueId=$unique"
 }
 
+cmd_copilot_studio() {
+  # Copilot Studio's A2A connection signs each user in with OAuth 2.0 (authorization code) and
+  # calls the gateway with that user's token, so per-user limits and entitlements still apply.
+  # Copilot Studio requires a client secret: create it in the portal (Certificates & secrets) and
+  # paste it straight into Copilot Studio, so it never passes through scripts or logs.
+  local gateway_app="$1" app gateway_scope
+  gateway_scope=$(az ad app show --id "$gateway_app" --query "api.oauth2PermissionScopes[?value=='Agents.Invoke'].id | [0]" -o tsv)
+  app=$(az ad app create --display-name "${AGW_COPILOT_APP_NAME:-agent-gateway-copilot-studio}" \
+        --sign-in-audience AzureADMyOrg \
+        --web-redirect-uris "https://global.consent.azure-apim.net/redirect" --query appId -o tsv)
+  az rest --method PATCH --url "$GRAPH/applications/$(az ad app show --id "$app" --query id -o tsv)" \
+    --headers Content-Type=application/json \
+    --body "{\"requiredResourceAccess\": [{\"resourceAppId\": \"$gateway_app\", \"resourceAccess\": [{\"id\": \"$gateway_scope\", \"type\": \"Scope\"}]}]}"
+  az ad sp create --id "$app" -o none
+  az ad app permission grant --id "$app" --api "$gateway_app" --scope Agents.Invoke -o none
+  echo "copilotStudioClientId=$app"
+  echo "Next: create a client secret for it in the portal, then configure Copilot Studio (docs/agent-gateway.md#copilot-studio-a2a)."
+}
+
 case "${1:-}" in
   app) cmd_app ;;
   group) [[ $# -eq 3 ]] || { echo "usage: $0 group <app-id> <group-name>" >&2; exit 2; }; cmd_group "$2" "$3" ;;
   grant) [[ $# -ge 3 ]] || { echo "usage: $0 grant <app-id> <principal-id>..." >&2; exit 2; }; shift; cmd_grant "$@" ;;
   chat) [[ $# -eq 2 ]] || { echo "usage: $0 chat <gateway-app-id>" >&2; exit 2; }; cmd_chat "$2" ;;
   chat-link) [[ $# -eq 4 ]] || { echo "usage: $0 chat-link <chat-app-id> <chat-url> <chat-mi-principal-id>" >&2; exit 2; }; cmd_chat_link "$2" "$3" "$4" ;;
+  copilot-studio) [[ $# -eq 2 ]] || { echo "usage: $0 copilot-studio <gateway-app-id>" >&2; exit 2; }; cmd_copilot_studio "$2" ;;
   teams) [[ $# -eq 3 ]] || { echo "usage: $0 teams <gateway-app-id> <bot-mi-principal-id>" >&2; exit 2; }; cmd_teams "$2" "$3" ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  *) sed -n '2,18p' "$0"; exit 2 ;;
 esac

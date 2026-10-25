@@ -476,6 +476,7 @@ resource runtime 'Microsoft.App/containerApps@2024-03-01' = if (deployRuntime) {
           env: [
             { name: 'AGW_MODEL_BASE_URL', value: '${apim.properties.gatewayUrl}/models/openai/v1' }
             { name: 'AGW_GATEWAY_SCOPE', value: '${gatewayAudience}/.default' }
+            { name: 'AGW_PUBLIC_BASE_URL', value: apim.properties.gatewayUrl }
             { name: 'AZURE_CLIENT_ID', value: runtimeIdentity.properties.clientId }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
             { name: 'OTEL_SERVICE_NAME', value: 'agent-gateway-runtime' }
@@ -573,6 +574,33 @@ resource runAgent 'Microsoft.ApiManagement/service/apis/operations@2024-06-01-pr
     method: 'POST'
     urlTemplate: '/{agent}/runs'
     templateParameters: [{ name: 'agent', type: 'string', required: true }]
+  }
+}
+
+// Agent2Agent (A2A) for Copilot Studio: JSON-RPC message endpoint (user token required) and the
+// public agent card (the front-door policy lets only this operation through without a token).
+resource a2aMessage 'Microsoft.ApiManagement/service/apis/operations@2024-06-01-preview' = if (deployRuntime) {
+  parent: agentsApi
+  name: 'a2a'
+  properties: {
+    displayName: 'A2A: send a message (Copilot Studio)'
+    method: 'POST'
+    urlTemplate: '/{agent}/a2a'
+    templateParameters: [{ name: 'agent', type: 'string', required: true }]
+  }
+}
+
+resource a2aCard 'Microsoft.ApiManagement/service/apis/operations@2024-06-01-preview' = if (deployRuntime) {
+  parent: agentsApi
+  name: 'a2a-card'
+  properties: {
+    displayName: 'A2A: agent card (public)'
+    method: 'GET'
+    urlTemplate: '/{agent}/a2a/.well-known/{file}'
+    templateParameters: [
+      { name: 'agent', type: 'string', required: true }
+      { name: 'file', type: 'string', required: true }
+    ]
   }
 }
 

@@ -121,7 +121,8 @@ run adds a new revision of the registration); `--dry-run` shows what it would se
 **Talking to the agents.** Foundry's playground can't run external agents: Foundry never calls
 them. Use any client of the gateway's `/agents/{agent}/runs` endpoint with an Entra token for
 the gateway: the [web chat](#clients), the CLI (`client.py run <agent> "<question>"`), the Teams
-bot, or plain HTTP from your own app or a script (see [Clients](#clients)).
+bot, [Copilot Studio over A2A](#copilot-studio-a2a), or plain HTTP from your own app or a script
+(see [Clients](#clients)).
 
 | To see | Look at |
 |---|---|
@@ -331,6 +332,76 @@ sequenceDiagram
   session id (`teams-…`) for the run explorer.
 - **App package.** `teams/package.py` builds the manifest (with `webApplicationInfo` for SSO)
   and icons into a zip to upload in Teams or the Teams admin center.
+
+### Copilot Studio (A2A)
+
+[Copilot Studio](https://learn.microsoft.com/microsoft-copilot-studio/add-agent-agent-to-agent)
+is Microsoft's supported front end for building, testing, publishing (Teams, Microsoft 365
+Copilot, a website) and analysing agents. The gateway's agents plug into it as **connected
+agents** over the open [Agent2Agent (A2A) protocol](https://a2a-protocol.org/): a Copilot Studio
+agent you build delegates to `cve-triage` or `threat-brief` when a question fits them.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant CS as Copilot Studio agent
+    participant E as Microsoft Entra ID
+    participant G as APIM /agents
+    participant R as Runtime
+    CS->>G: GET /agents/cve-triage/a2a/.well-known/agent.json (public card)
+    U->>CS: question
+    CS->>E: OAuth 2.0 sign-in (once per user): token for api://<gateway>/Agents.Invoke
+    CS->>G: POST /agents/cve-triage/a2a (JSON-RPC message/send, user's token)
+    G->>G: same checks as any run: tier, team, entitlement, runs/min
+    G->>R: message + context headers
+    R->>R: run the agent (history from Copilot Studio, session = contextId)
+    R-->>CS: A2A Message (answer, run id, tokens, tools in metadata)
+    CS-->>U: answer
+```
+
+- **The same gateway rules apply.** Copilot Studio calls the front door with each user's own
+  token, so entitlements, per-user token limits, metrics, usage events and traces are the same
+  as from the CLI or web chat. A limit shows up as a "⏳" answer in the conversation.
+- **Endpoints.** One per agent: `https://<apim>.azure-api.net/agents/<agent>/a2a`. The agent
+  card at `…/a2a/.well-known/agent.json` (and `agent-card.json`) is the only operation the
+  gateway serves without a token; it carries the agent's name, description and skills.
+- **Conversations.** Copilot Studio sends the chat history and a stable `contextId`; the runtime
+  uses the history as context and the `contextId` as the session id, so the *run explorer*
+  groups a Copilot Studio conversation like a web chat session.
+- **One secret, by Copilot Studio's design.** Its OAuth 2.0 connection requires a client
+  secret. Create it in the portal and paste it straight into Copilot Studio; rotate it on a
+  schedule. Everything else in the gateway stays secret-free.
+- **What Copilot Studio shows.** Its test canvas and analytics show its own orchestration step
+  by step, with the gateway agent as one step. The agent's own model and tool calls are in
+  Foundry's trace view and the workbooks (metadata on each answer carries the run id).
+
+**Set it up** (needs a Copilot Studio licence or trial on a **member** account in the tenant,
+and Application Administrator for step 1):
+
+1. **Create the OAuth client**: `./entra.sh copilot-studio <gateway-app-id>` (Bicep path) or
+   `enable_copilot_studio = true` (Terraform). It prints the client ID.
+2. **Create its secret**: Entra ID → App registrations → `agent-gateway-copilot-studio` →
+   Certificates & secrets → New client secret. Copy the value (shown once).
+3. **In [Copilot Studio](https://copilotstudio.microsoft.com)**, create or open an agent (for
+   example "SecOps assistant") → **Agents** → **Add agent** → **A2A agent**:
+
+    | Field | Value |
+    |---|---|
+    | Endpoint URL | `https://<apim>.azure-api.net/agents/cve-triage/a2a` (name and description fill in from the card) |
+    | Authentication | **OAuth 2.0** |
+    | Client ID / secret | from steps 1 and 2 |
+    | Authorization URL | `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize` |
+    | Token URL / Refresh URL | `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` |
+    | Scope (if asked) | `api://<gateway-app-id>/Agents.Invoke offline_access` |
+
+4. **Redirect URI**: if Copilot Studio shows a redirect URL for the connection that differs from
+   `https://global.consent.azure-apim.net/redirect`, add it to the app registration's Web
+   redirect URIs (Terraform: `copilot_studio_redirect_uris`).
+5. **Create the connection** (you sign in once), **Add and configure**, then repeat for
+   `threat-brief`.
+6. **Test** in the test canvas ("Prioritise CVE-2024-3400 and CVE-2023-4966"), then **publish**
+   to Teams, Microsoft 365 Copilot or a website.
 
 **Your gateway profile: `GET /agents/me`.** APIM answers this itself, from the values it
 just derived from the token (the runtime isn't called): user, tier and its token limits,
@@ -710,6 +781,7 @@ APIM Standard v2, `gpt-5-mini` (GlobalStandard, 500K TPM), the runtime on Contai
 | `GET /agents/me` directly and through chat OBO | ✅ tier, team, cost center, limits, agents |
 | Foundry external agents registered; project with App Insights connected | ✅ |
 | Teams bot deployed: Azure Bot, Teams channel, federated SSO connection, health | ✅ (Teams sign-in not yet tested: needs a licensed user) |
+| A2A: public agent card, 401 without a token, Copilot-Studio-shaped `message/send` with chat history and `contextId` | ✅ answer in ~24 s, session = contextId (Copilot Studio itself not yet connected: needs a licence) |
 
 Fixes found by the pilot (already in the code): the CLI client asks for `/.default`
 (the Azure CLI credential rejects named scopes); Bicep takes environment-specific policy

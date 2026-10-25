@@ -15,6 +15,7 @@ steps are in [docs/agent-gateway.md](../../docs/agent-gateway.md).
 | `runtime/` | The agent runtime (FastAPI + secsdk) and its Dockerfile |
 | `chat/` | Web chat: MSAL.js sign-in page + backend that calls the gateway on-behalf-of the user |
 | `teams/` | Teams bot (Microsoft 365 Agents SDK): SSO + OBO, no secrets; `package.py` builds the Teams app zip |
+| `runtime/agw_runtime/a2a.py` | Agent2Agent (A2A) endpoint and agent card, for Copilot Studio |
 | `register_agents.py` | Registers the agents as Foundry external agents (trace view) |
 | `client.py` | Call the gateway as yourself (`az login`) |
 | `tests/` | Offline tests: `uv run pytest deploy/agent-gateway` |

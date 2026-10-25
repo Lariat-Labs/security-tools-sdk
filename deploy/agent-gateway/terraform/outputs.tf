@@ -50,3 +50,13 @@ output "log_analytics_workspace_id" {
 output "usage_event_hub" {
   value = "${azurerm_eventhub_namespace.this.name}/${azurerm_eventhub.usage.name}"
 }
+
+output "copilot_studio_client_id" {
+  description = "Client ID for Copilot Studio's A2A OAuth 2.0 connection (create its secret in the portal)."
+  value       = var.enable_copilot_studio ? azuread_application_registration.copilot_studio[0].client_id : ""
+}
+
+output "a2a_endpoints" {
+  description = "A2A endpoint per agent, for Copilot Studio (Add agent > A2A agent)."
+  value       = local.deploy_runtime ? "${azurerm_api_management.this.gateway_url}/agents/<agent>/a2a" : ""
+}

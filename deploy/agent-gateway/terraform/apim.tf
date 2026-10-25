@@ -193,6 +193,9 @@ resource "azurerm_api_management_api_operation" "agents" {
     "list-agents" = { name = "List my agents", method = "GET", url = "/" }
     "whoami"      = { name = "My gateway profile (tier, team, cost center, limits)", method = "GET", url = "/me" }
     "run-agent"   = { name = "Run an agent", method = "POST", url = "/{agent}/runs" }
+    # Agent2Agent for Copilot Studio; the card is the only operation reachable without a token.
+    "a2a"      = { name = "A2A: send a message (Copilot Studio)", method = "POST", url = "/{agent}/a2a" }
+    "a2a-card" = { name = "A2A: agent card (public)", method = "GET", url = "/{agent}/a2a/.well-known/{file}" }
   } : {}
   operation_id        = each.key
   api_name            = azurerm_api_management_api.agents[0].name
@@ -203,9 +206,18 @@ resource "azurerm_api_management_api_operation" "agents" {
   url_template        = each.value.url
 
   dynamic "template_parameter" {
-    for_each = each.key == "run-agent" ? [1] : []
+    for_each = contains(["run-agent", "a2a", "a2a-card"], each.key) ? ["agent"] : []
     content {
-      name     = "agent"
+      name     = template_parameter.value
+      type     = "string"
+      required = true
+    }
+  }
+
+  dynamic "template_parameter" {
+    for_each = each.key == "a2a-card" ? ["file"] : []
+    content {
+      name     = template_parameter.value
       type     = "string"
       required = true
     }

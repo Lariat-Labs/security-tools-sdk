@@ -65,6 +65,7 @@ resource "azurerm_container_app" "runtime" {
         for_each = {
           AGW_MODEL_BASE_URL                    = "${azurerm_api_management.this.gateway_url}/models/openai/v1"
           AGW_GATEWAY_SCOPE                     = "${local.gateway_audience}/.default"
+          AGW_PUBLIC_BASE_URL                   = azurerm_api_management.this.gateway_url
           AZURE_CLIENT_ID                       = azurerm_user_assigned_identity.runtime.client_id
           APPLICATIONINSIGHTS_CONNECTION_STRING = azurerm_application_insights.this.connection_string
           OTEL_SERVICE_NAME                     = "agent-gateway-runtime"
