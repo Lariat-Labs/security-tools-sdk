@@ -170,6 +170,21 @@ resource "azapi_resource_action" "models_policy" {
   ]
 }
 
+# Deletes the policy at destroy time, before the backends and named values it references
+# (APIM refuses to delete those while a policy uses them).
+resource "azapi_resource_action" "models_policy_delete" {
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.models_api_id}/policies/policy"
+  method      = "DELETE"
+  when        = "destroy"
+  depends_on = [
+    azurerm_api_management_api.models,
+    azurerm_api_management_named_value.ids,
+    azurerm_api_management_backend.models,
+    azurerm_api_management_logger.usage,
+  ]
+}
+
 # ----- the front door users call -----------------------------------------------------------
 
 resource "azurerm_api_management_backend" "runtime" {
@@ -240,6 +255,21 @@ resource "azapi_resource_action" "agents_policy" {
       value  = file("${path.module}/${var.agents_policy_file}")
     }
   }
+  depends_on = [
+    azurerm_api_management_api.agents,
+    azurerm_api_management_named_value.ids,
+    azurerm_api_management_backend.runtime,
+  ]
+}
+
+# Deletes the policy at destroy time, before the backends and named values it references
+# (APIM refuses to delete those while a policy uses them).
+resource "azapi_resource_action" "agents_policy_delete" {
+  count       = local.deploy_runtime ? 1 : 0
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.agents_api_id}/policies/policy"
+  method      = "DELETE"
+  when        = "destroy"
   depends_on = [
     azurerm_api_management_api.agents,
     azurerm_api_management_named_value.ids,

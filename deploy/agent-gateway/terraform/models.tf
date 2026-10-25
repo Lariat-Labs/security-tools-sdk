@@ -14,6 +14,13 @@ resource "azurerm_cognitive_account" "foundry" {
   tags = var.tags
 }
 
+# The account stays busy for a while after its project and deployments are deleted, and
+# rejects its own delete until then. Destroy waits here between the children and the account.
+resource "time_sleep" "foundry_settle" {
+  destroy_duration = "90s"
+  depends_on       = [azurerm_cognitive_account.foundry]
+}
+
 resource "azurerm_cognitive_deployment" "models" {
   for_each             = { for d in var.model_deployments : d.name => d }
   name                 = each.value.name
@@ -27,6 +34,7 @@ resource "azurerm_cognitive_deployment" "models" {
     name     = each.value.sku
     capacity = each.value.capacity
   }
+  depends_on = [time_sleep.foundry_settle]
 }
 
 resource "azurerm_role_assignment" "apim_calls_models" {

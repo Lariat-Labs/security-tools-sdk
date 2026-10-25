@@ -173,3 +173,13 @@ variable "github_environment" {
   type        = string
   default     = "agent-gateway"
 }
+
+variable "github_oidc_subject_prefix" {
+  description = <<-EOT
+    Subject prefix of the repository's OIDC tokens, when it isn't "repo:<owner>/<name>". Repositories
+    using GitHub's immutable subject claims have one with ids ("repo:<owner>@<id>/<name>@<id>"). Print it with:
+    gh api repos/<owner>/<name>/actions/oidc/customization/sub --jq .sub_claim_prefix
+  EOT
+  type        = string
+  default     = ""
+}

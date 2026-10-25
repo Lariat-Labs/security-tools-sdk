@@ -5,6 +5,8 @@
 
 locals {
   github_deploy = var.github_repository != ""
+  # Repositories using GitHub's immutable subject claims put ids in it (owner@id/repo@id).
+  github_subject_prefix = coalesce(var.github_oidc_subject_prefix, "repo:${var.github_repository}")
   container_apps = merge(
     local.deploy_runtime ? { runtime = azurerm_container_app.runtime[0].id } : {},
     local.deploy_chat ? { chat = azurerm_container_app.chat[0].id } : {},
@@ -25,7 +27,7 @@ resource "azurerm_federated_identity_credential" "github" {
   name                      = "github-${var.github_environment}"
   user_assigned_identity_id = azurerm_user_assigned_identity.github[0].id
   issuer                    = "https://token.actions.githubusercontent.com"
-  subject                   = "repo:${var.github_repository}:environment:${var.github_environment}"
+  subject                   = "${local.github_subject_prefix}:environment:${var.github_environment}"
   audience                  = ["api://AzureADTokenExchange"]
 }
 
