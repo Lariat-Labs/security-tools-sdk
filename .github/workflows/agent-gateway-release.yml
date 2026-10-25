@@ -49,12 +49,14 @@ jobs:
           else v="sha-${GITHUB_SHA::7}"; fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: env.ENABLED == 'true'
+        with:
+          persist-credentials: false
 
       - name: Sign in to Azure (OIDC)
         if: env.ENABLED == 'true'
-        uses: azure/login@v3
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -64,7 +66,7 @@ jobs:
       # pushes to the registry, and updates the existing container app's image.
       - name: Build, push and deploy agw-${{ matrix.app }}
         if: env.ENABLED == 'true'
-        uses: azure/container-apps-deploy-action@v2
+        uses: azure/container-apps-deploy-action@8dff69dac3367c32ceb2690d8f13adbeab462703 # v2
         with:
           appSourcePath: ${{ github.workspace }}
           dockerfilePath: deploy/agent-gateway/${{ matrix.app }}/Dockerfile
