@@ -1,0 +1,75 @@
+name: Agent gateway release
+
+# Builds the gateway's container images, pushes them to the gateway's Azure Container
+# Registry and rolls out a new Container Apps revision. Signs in to Azure with OIDC as the
+# identity Terraform creates when github_repository is set (terraform/github.tf), so there is
+# no Azure secret in GitHub. Configure the "agent-gateway" environment with the variables from
+# `terraform output github_variables`.
+
+on:
+  push:
+    tags: ["agw-v*"] # agw-v0.7.0 publishes images tagged 0.7.0
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image tag (default: sha-<commit>)"
+        required: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for azure/login
+
+concurrency:
+  group: agent-gateway-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: agent-gateway
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [runtime, chat, teams]
+    env:
+      ENABLED: ${{ contains(fromJSON(vars.AGW_APPS || '[]'), matrix.app) }}
+    steps:
+      - name: Skip apps this deployment doesn't have
+        if: env.ENABLED != 'true'
+        run: echo "agw-${{ matrix.app }} is not in AGW_APPS; skipping."
+
+      - name: Image tag
+        if: env.ENABLED == 'true'
+        id: tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#agw-v}"
+          elif [ -n "$INPUT_VERSION" ]; then v="$INPUT_VERSION"
+          else v="sha-${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: env.ENABLED == 'true'
+
+      - name: Sign in to Azure (OIDC)
+        if: env.ENABLED == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Builds from the repository root (the images install packages/secsdk from source),
+      # pushes to the registry, and updates the existing container app's image.
+      - name: Build, push and deploy agw-${{ matrix.app }}
+        if: env.ENABLED == 'true'
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          appSourcePath: ${{ github.workspace }}
+          dockerfilePath: deploy/agent-gateway/${{ matrix.app }}/Dockerfile
+          acrName: ${{ vars.AGW_ACR_NAME }}
+          imageToBuild: ${{ vars.AGW_ACR_NAME }}.azurecr.io/agw-${{ matrix.app }}:${{ steps.tag.outputs.version }}
+          containerAppName: ${{ vars.AGW_APP_PREFIX }}-${{ matrix.app }}
+          resourceGroup: ${{ vars.AGW_RESOURCE_GROUP }}
+          disableTelemetry: true

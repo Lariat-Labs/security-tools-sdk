@@ -20,12 +20,12 @@ provider "azurerm" {
     log_analytics_workspace {
       permanently_delete_on_destroy = true
     }
-    application_insights {
-      disable_generated_rule = true # no untracked "Failure Anomalies" alert in the group
-    }
     resource_group {
       # The group is created by this configuration and holds only the gateway, so destroy
-      # also removes anything Azure added to it on its own.
+      # also removes anything Azure added to it on its own (such as App Insights' "Failure
+      # Anomalies" alert rule). application_insights.disable_generated_rule is deliberately
+      # not used: it waits for that rule, which never appears on subscriptions without the
+      # Microsoft.AlertsManagement provider registered, so the apply hangs.
       prevent_deletion_if_contains_resources = false
     }
   }

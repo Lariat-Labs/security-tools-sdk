@@ -86,11 +86,13 @@ resource "azurerm_monitor_diagnostic_setting" "apim" {
 }
 
 # Token counts per model call in ApiManagementGatewayLlmLog. Prompt and completion
-# logging (requests/responses) are separate opt-ins and stay off.
-resource "azapi_resource" "llm_logs" {
-  type      = "Microsoft.ApiManagement/service/diagnostics@2024-06-01-preview"
-  name      = "azuremonitor"
-  parent_id = azurerm_api_management.this.id
+# logging (requests/responses) are separate opt-ins and stay off. APIM creates the
+# "azuremonitor" diagnostic itself once the diagnostic setting exists, so this is a PUT
+# (create or update) rather than a resource Terraform would try to create.
+resource "azapi_resource_action" "llm_logs" {
+  type        = "Microsoft.ApiManagement/service/diagnostics@2024-06-01-preview"
+  resource_id = "${azurerm_api_management.this.id}/diagnostics/azuremonitor"
+  method      = "PUT"
   body = {
     properties = {
       loggerId           = "/loggers/azuremonitor"
@@ -147,10 +149,13 @@ resource "azurerm_api_management_api_operation" "chat_completions" {
 
 # azapi so the policy is sent as format "xml" (azurerm's api_policy sends "rawxml", and
 # render_policies.py emits properly escaped XML).
-resource "azapi_resource" "models_policy" {
-  type      = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
-  name      = "policy"
-  parent_id = local.models_api_id
+# API policies are sent as a PUT (re-sent whenever the file changes) instead of being managed
+# as resources: APIM stores the XML reformatted, so a managed resource would show a change on
+# every plan, and replacing one would briefly leave the API without its token checks.
+resource "azapi_resource_action" "models_policy" {
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.models_api_id}/policies/policy"
+  method      = "PUT"
   body = {
     properties = {
       format = "xml"
@@ -224,11 +229,11 @@ resource "azurerm_api_management_api_operation" "agents" {
   }
 }
 
-resource "azapi_resource" "agents_policy" {
-  count     = local.deploy_runtime ? 1 : 0
-  type      = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
-  name      = "policy"
-  parent_id = local.agents_api_id
+resource "azapi_resource_action" "agents_policy" {
+  count       = local.deploy_runtime ? 1 : 0
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.agents_api_id}/policies/policy"
+  method      = "PUT"
   body = {
     properties = {
       format = "xml"

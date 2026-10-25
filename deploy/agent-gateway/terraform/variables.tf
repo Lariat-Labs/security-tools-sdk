@@ -161,3 +161,15 @@ variable "foundry_users" {
   type        = list(string)
   default     = []
 }
+
+variable "github_repository" {
+  description = "owner/name of the GitHub repository whose release workflow may push images and roll out new container app revisions (OIDC, no secret). Empty: no GitHub deploy identity."
+  type        = string
+  default     = ""
+}
+
+variable "github_environment" {
+  description = "GitHub environment the release workflow runs in; only its tokens are trusted."
+  type        = string
+  default     = "agent-gateway"
+}
