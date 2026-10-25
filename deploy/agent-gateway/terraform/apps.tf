@@ -23,6 +23,7 @@ resource "azurerm_container_app_environment" "this" {
   name                       = "cae-${var.prefix}-${local.suffix}"
   resource_group_name        = azurerm_resource_group.this.name
   location                   = var.location
+  logs_destination           = "log-analytics"
   log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
   tags                       = var.tags
 }
@@ -65,6 +66,7 @@ resource "azurerm_container_app" "runtime" {
         for_each = {
           AGW_MODEL_BASE_URL                    = "${azurerm_api_management.this.gateway_url}/models/openai/v1"
           AGW_GATEWAY_SCOPE                     = "${local.gateway_audience}/.default"
+          AGW_PUBLIC_BASE_URL                   = azurerm_api_management.this.gateway_url
           AZURE_CLIENT_ID                       = azurerm_user_assigned_identity.runtime.client_id
           APPLICATIONINSIGHTS_CONNECTION_STRING = azurerm_application_insights.this.connection_string
           OTEL_SERVICE_NAME                     = "agent-gateway-runtime"
@@ -91,6 +93,11 @@ resource "azurerm_container_app" "runtime" {
   }
   tags       = var.tags
   depends_on = [azurerm_role_assignment.acr_pull]
+  lifecycle {
+    # The image variable sets the first revision; after that the release workflow rolls out
+    # images (see github.tf), and Terraform leaves them alone.
+    ignore_changes = [template[0].container[0].image]
+  }
 }
 
 # Only the gateway's identity may call the runtime, so its x-agw-* headers can be trusted.
@@ -182,6 +189,11 @@ resource "azurerm_container_app" "chat" {
   }
   tags       = var.tags
   depends_on = [azurerm_role_assignment.acr_pull]
+  lifecycle {
+    # The image variable sets the first revision; after that the release workflow rolls out
+    # images (see github.tf), and Terraform leaves them alone.
+    ignore_changes = [template[0].container[0].image]
+  }
 }
 
 # ----- Teams bot -------------------------------------------------------------------------------
@@ -247,4 +259,9 @@ resource "azurerm_container_app" "teams" {
   }
   tags       = var.tags
   depends_on = [azurerm_role_assignment.acr_pull]
+  lifecycle {
+    # The image variable sets the first revision; after that the release workflow rolls out
+    # images (see github.tf), and Terraform leaves them alone.
+    ignore_changes = [template[0].container[0].image]
+  }
 }

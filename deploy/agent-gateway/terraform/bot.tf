@@ -27,6 +27,7 @@ resource "azapi_resource" "teams_sso" {
   name      = "teams-sso"
   parent_id = azurerm_bot_service_azure_bot.this[0].id
   location  = "global"
+  tags      = var.tags # Azure copies the bot's tags onto the connection
   body = {
     properties = {
       serviceProviderId = "c00b44ab-5e16-c44c-af26-2fd5bc55eb18" # Aadv2WithFic
@@ -40,4 +41,9 @@ resource "azapi_resource" "teams_sso" {
     }
   }
   depends_on = [azuread_application_federated_identity_credential.teams_token_store]
+  lifecycle {
+    # Azure rewrites the parameters (lowercase keys, plus values it derives such as the
+    # federated credential subject), which would otherwise show a change on every plan.
+    ignore_changes = [body.properties.parameters]
+  }
 }

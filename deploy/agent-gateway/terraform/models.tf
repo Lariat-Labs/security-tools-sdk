@@ -14,6 +14,13 @@ resource "azurerm_cognitive_account" "foundry" {
   tags = var.tags
 }
 
+# The account stays busy for a while after its project and deployments are deleted, and
+# rejects its own delete until then. Destroy waits here between the children and the account.
+resource "time_sleep" "foundry_settle" {
+  destroy_duration = "90s"
+  depends_on       = [azurerm_cognitive_account.foundry]
+}
+
 resource "azurerm_cognitive_deployment" "models" {
   for_each             = { for d in var.model_deployments : d.name => d }
   name                 = each.value.name
@@ -27,6 +34,7 @@ resource "azurerm_cognitive_deployment" "models" {
     name     = each.value.sku
     capacity = each.value.capacity
   }
+  depends_on = [time_sleep.foundry_settle]
 }
 
 resource "azurerm_role_assignment" "apim_calls_models" {
@@ -51,6 +59,14 @@ resource "azurerm_cognitive_account_project" "agents" {
   depends_on = [azurerm_cognitive_deployment.models]
 }
 
+# Foundry's agent Monitor tab queries Application Insights as the project's managed identity.
+resource "azurerm_role_assignment" "project_reads_telemetry" {
+  scope                = azurerm_application_insights.this.id
+  role_definition_name = "Monitoring Reader"
+  principal_id         = azurerm_cognitive_account_project.agents.identity[0].principal_id
+  principal_type       = "ServicePrincipal"
+}
+
 resource "azapi_resource" "foundry_appinsights" {
   type      = "Microsoft.CognitiveServices/accounts/connections@2025-06-01"
   name      = "appinsights"
@@ -66,4 +82,14 @@ resource "azapi_resource" "foundry_appinsights" {
     }
   }
   depends_on = [azurerm_cognitive_account_project.agents]
+}
+
+# Foundry's portal runs Insights scans and evaluations with gpt-5-mini as the signed-in person,
+# which needs model inference on the account. Foundry User (formerly Azure AI User) grants it
+# by role id, since the display name changed.
+resource "azurerm_role_assignment" "foundry_users" {
+  for_each           = toset(concat([data.azurerm_client_config.current.object_id], var.foundry_users))
+  scope              = azurerm_cognitive_account.foundry.id
+  role_definition_id = "/subscriptions/${var.subscription_id}/providers/Microsoft.Authorization/roleDefinitions/53ca6127-db72-4b80-b1b0-d745d6d5456d"
+  principal_id       = each.value
 }

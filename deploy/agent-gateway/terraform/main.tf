@@ -1,14 +1,34 @@
-# Agent gateway on Azure: Terraform equivalent of infra/main.bicep + entra.sh.
+# Agent gateway on Azure and Entra.
 #
 # One `terraform apply` creates the Entra app registrations, identities, APIM, models,
 # monitoring and (once images exist) the runtime, web chat and Teams bot. See README.md.
 #
 # Providers: azurerm for most resources, azuread for Entra, azapi where azurerm can't
-# express exactly what the Bicep does (policies in XML format, Container Apps auth,
+# express exactly what's needed (policies in XML format, Container Apps auth,
 # APIM LLM logging, the Foundry App Insights connection, the federated Bot OAuth connection).
 
 provider "azurerm" {
-  features {}
+  # Make `terraform destroy` complete and repeatable: names are deterministic, so anything left
+  # soft-deleted would block the next apply.
+  features {
+    api_management {
+      purge_soft_delete_on_destroy = true
+    }
+    cognitive_account {
+      purge_soft_delete_on_destroy = true
+    }
+    log_analytics_workspace {
+      permanently_delete_on_destroy = true
+    }
+    resource_group {
+      # The group is created by this configuration and holds only the gateway, so destroy
+      # also removes anything Azure added to it on its own (such as App Insights' "Failure
+      # Anomalies" alert rule). application_insights.disable_generated_rule is deliberately
+      # not used: it waits for that rule, which never appears on subscriptions without the
+      # Microsoft.AlertsManagement provider registered, so the apply hangs.
+      prevent_deletion_if_contains_resources = false
+    }
+  }
   subscription_id = var.subscription_id
 }
 
@@ -26,7 +46,7 @@ resource "azurerm_resource_group" "this" {
 
 locals {
   tenant_id = data.azurerm_client_config.current.tenant_id
-  # Stable per subscription + resource group, like Bicep's uniqueString(resourceGroup().id).
+  # Stable per subscription + resource group, so names don't change between applies.
   suffix = substr(sha1("${var.subscription_id}/${var.resource_group_name}"), 0, 13)
 
   deploy_runtime = var.runtime_image != ""

@@ -86,11 +86,13 @@ resource "azurerm_monitor_diagnostic_setting" "apim" {
 }
 
 # Token counts per model call in ApiManagementGatewayLlmLog. Prompt and completion
-# logging (requests/responses) are separate opt-ins and stay off.
-resource "azapi_resource" "llm_logs" {
-  type      = "Microsoft.ApiManagement/service/diagnostics@2024-06-01-preview"
-  name      = "azuremonitor"
-  parent_id = azurerm_api_management.this.id
+# logging (requests/responses) are separate opt-ins and stay off. APIM creates the
+# "azuremonitor" diagnostic itself once the diagnostic setting exists, so this is a PUT
+# (create or update) rather than a resource Terraform would try to create.
+resource "azapi_resource_action" "llm_logs" {
+  type        = "Microsoft.ApiManagement/service/diagnostics@2024-06-01-preview"
+  resource_id = "${azurerm_api_management.this.id}/diagnostics/azuremonitor"
+  method      = "PUT"
   body = {
     properties = {
       loggerId           = "/loggers/azuremonitor"
@@ -147,16 +149,34 @@ resource "azurerm_api_management_api_operation" "chat_completions" {
 
 # azapi so the policy is sent as format "xml" (azurerm's api_policy sends "rawxml", and
 # render_policies.py emits properly escaped XML).
-resource "azapi_resource" "models_policy" {
-  type      = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
-  name      = "policy"
-  parent_id = local.models_api_id
+# API policies are sent as a PUT (re-sent whenever the file changes) instead of being managed
+# as resources: APIM stores the XML reformatted, so a managed resource would show a change on
+# every plan, and replacing one would briefly leave the API without its token checks.
+resource "azapi_resource_action" "models_policy" {
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.models_api_id}/policies/policy"
+  method      = "PUT"
   body = {
     properties = {
       format = "xml"
       value  = file("${path.module}/${var.models_policy_file}")
     }
   }
+  depends_on = [
+    azurerm_api_management_api.models,
+    azurerm_api_management_named_value.ids,
+    azurerm_api_management_backend.models,
+    azurerm_api_management_logger.usage,
+  ]
+}
+
+# Deletes the policy at destroy time, before the backends and named values it references
+# (APIM refuses to delete those while a policy uses them).
+resource "azapi_resource_action" "models_policy_delete" {
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.models_api_id}/policies/policy"
+  method      = "DELETE"
+  when        = "destroy"
   depends_on = [
     azurerm_api_management_api.models,
     azurerm_api_management_named_value.ids,
@@ -193,6 +213,9 @@ resource "azurerm_api_management_api_operation" "agents" {
     "list-agents" = { name = "List my agents", method = "GET", url = "/" }
     "whoami"      = { name = "My gateway profile (tier, team, cost center, limits)", method = "GET", url = "/me" }
     "run-agent"   = { name = "Run an agent", method = "POST", url = "/{agent}/runs" }
+    # Agent2Agent for Copilot Studio; the card is the only operation reachable without a token.
+    "a2a"      = { name = "A2A: send a message (Copilot Studio)", method = "POST", url = "/{agent}/a2a" }
+    "a2a-card" = { name = "A2A: agent card (public)", method = "GET", url = "/{agent}/a2a/.well-known/{file}" }
   } : {}
   operation_id        = each.key
   api_name            = azurerm_api_management_api.agents[0].name
@@ -203,26 +226,50 @@ resource "azurerm_api_management_api_operation" "agents" {
   url_template        = each.value.url
 
   dynamic "template_parameter" {
-    for_each = each.key == "run-agent" ? [1] : []
+    for_each = contains(["run-agent", "a2a", "a2a-card"], each.key) ? ["agent"] : []
     content {
-      name     = "agent"
+      name     = template_parameter.value
+      type     = "string"
+      required = true
+    }
+  }
+
+  dynamic "template_parameter" {
+    for_each = each.key == "a2a-card" ? ["file"] : []
+    content {
+      name     = template_parameter.value
       type     = "string"
       required = true
     }
   }
 }
 
-resource "azapi_resource" "agents_policy" {
-  count     = local.deploy_runtime ? 1 : 0
-  type      = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
-  name      = "policy"
-  parent_id = local.agents_api_id
+resource "azapi_resource_action" "agents_policy" {
+  count       = local.deploy_runtime ? 1 : 0
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.agents_api_id}/policies/policy"
+  method      = "PUT"
   body = {
     properties = {
       format = "xml"
       value  = file("${path.module}/${var.agents_policy_file}")
     }
   }
+  depends_on = [
+    azurerm_api_management_api.agents,
+    azurerm_api_management_named_value.ids,
+    azurerm_api_management_backend.runtime,
+  ]
+}
+
+# Deletes the policy at destroy time, before the backends and named values it references
+# (APIM refuses to delete those while a policy uses them).
+resource "azapi_resource_action" "agents_policy_delete" {
+  count       = local.deploy_runtime ? 1 : 0
+  type        = "Microsoft.ApiManagement/service/apis/policies@2024-06-01-preview"
+  resource_id = "${local.agents_api_id}/policies/policy"
+  method      = "DELETE"
+  when        = "destroy"
   depends_on = [
     azurerm_api_management_api.agents,
     azurerm_api_management_named_value.ids,

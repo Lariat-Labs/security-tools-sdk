@@ -50,3 +50,26 @@ output "log_analytics_workspace_id" {
 output "usage_event_hub" {
   value = "${azurerm_eventhub_namespace.this.name}/${azurerm_eventhub.usage.name}"
 }
+
+output "copilot_studio_client_id" {
+  description = "Client ID for Copilot Studio's A2A OAuth 2.0 connection (create its secret in the portal)."
+  value       = var.enable_copilot_studio ? azuread_application_registration.copilot_studio[0].client_id : ""
+}
+
+output "a2a_endpoints" {
+  description = "A2A endpoint per agent, for Copilot Studio (Add agent > A2A agent)."
+  value       = local.deploy_runtime ? "${azurerm_api_management.this.gateway_url}/agents/<agent>/a2a" : ""
+}
+
+output "github_variables" {
+  description = "Variables for the GitHub environment the release workflow uses (none are secret)."
+  value = local.github_deploy ? {
+    AZURE_CLIENT_ID       = azurerm_user_assigned_identity.github[0].client_id
+    AZURE_TENANT_ID       = local.tenant_id
+    AZURE_SUBSCRIPTION_ID = var.subscription_id
+    AGW_RESOURCE_GROUP    = azurerm_resource_group.this.name
+    AGW_ACR_NAME          = azurerm_container_registry.this.name
+    AGW_APP_PREFIX        = "ca-${var.prefix}"
+    AGW_APPS              = jsonencode(keys(local.container_apps))
+  } : {}
+}

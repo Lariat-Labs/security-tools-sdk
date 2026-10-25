@@ -5,6 +5,8 @@ the gateway's managed identity alone. That is why the ``x-agw-*`` headers, which
 APIM sets from the user's validated token, can be trusted here.
 
     GET  /agents                 agents the caller may use
+    POST /agents/{agent}/a2a     Agent2Agent JSON-RPC (message/send), for Copilot Studio
+    GET  /agents/{agent}/a2a/.well-known/agent.json   A2A agent card (public)
     POST /agents/{agent}/runs    {"input": "...", "history": [{"role": "user", "content": "..."}]}
     GET  /healthz
 
@@ -14,20 +16,23 @@ Environment:
     AGW_GATEWAY_SCOPE    api://<gateway-app-id>/.default
     AZURE_CLIENT_ID      client id of the runtime's user-assigned managed identity
     AGW_AGENTS_DIR       optional; defaults to the bundled agents/ directory
+    AGW_PUBLIC_BASE_URL  the gateway's public URL, for A2A agent cards (https://<apim>.azure-api.net)
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from typing import Annotated, Any, Literal
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from secsdk import telemetry
 
-from . import __version__
+from . import __version__, a2a
 from .agents import AgentDefinition, load_agents
 from .loop import AgentRunner, GatewayError, GatewayLimitError, GatewayModelClient, UserContext
 
@@ -146,6 +151,74 @@ def create_app(
             status = exc.status if 400 <= exc.status < 500 else 502
             return _error(status, exc.code, exc.message)
         return result.to_dict()
+
+    # ----- Agent2Agent (Copilot Studio) --------------------------------------------------------
+
+    def public_endpoint(agent: str) -> str:
+        base = os.environ.get("AGW_PUBLIC_BASE_URL", "").rstrip("/")
+        return f"{base}/agents/{agent}/a2a"
+
+    @app.get("/agents/{agent}/a2a/.well-known/agent.json")
+    @app.get("/agents/{agent}/a2a/.well-known/agent-card.json")
+    def a2a_card(agent: str) -> Any:
+        definition = catalog.get(agent)
+        if definition is None:
+            return _error(404, "unknown_agent", f"No agent named '{agent}'.")
+        return a2a.agent_card(definition, public_endpoint(agent))
+
+    @app.post("/agents/{agent}/a2a")
+    async def a2a_message(agent: str, request: Request) -> Any:
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(a2a.error(None, a2a.PARSE_ERROR, "Body is not JSON."))
+        try:
+            request_id, text, history, context_id = a2a.parse_request(body)
+        except a2a.A2AError as exc:
+            rid = body.get("id") if isinstance(body, dict) else None
+            return JSONResponse(a2a.error(rid, exc.code, exc.message))
+
+        ctx = _context(request)
+        if ctx is None or not ctx.run_id:
+            return _error(401, "missing_context", "Call this service through the agent gateway.")
+        definition = catalog.get(agent)
+        if definition is None:
+            return JSONResponse(
+                a2a.error(request_id, a2a.INVALID_PARAMS, f"No agent named '{agent}'.")
+            )
+        if agent not in ctx.allowed_agents:  # APIM checks this too
+            return JSONResponse(
+                a2a.reply(request_id, "🔒 You don't have access to this agent.", context_id)
+            )
+        # One A2A conversation = one gateway session, so the run explorer groups its turns.
+        session = a2a.session_from_context(context_id)
+        if session:
+            ctx = dataclasses.replace(ctx, session=session)
+
+        def run() -> Any:
+            return get_runner().run(definition, ctx, text, history)
+
+        try:
+            result = await anyio.to_thread.run_sync(run)
+        except GatewayLimitError as exc:
+            # Answer in the conversation so the user sees why, instead of a protocol error.
+            return JSONResponse(a2a.reply(request_id, f"⏳ {exc.message}", context_id))
+        except GatewayError as exc:
+            return JSONResponse(a2a.error(request_id, a2a.INTERNAL_ERROR, exc.message))
+        usage = result.usage
+        return JSONResponse(
+            a2a.reply(
+                request_id,
+                result.output,
+                context_id,
+                metadata={
+                    "agw/run_id": result.run_id,
+                    "agw/stop_reason": result.stop_reason,
+                    "agw/total_tokens": usage.get("total_tokens", 0),
+                    "agw/tools": [t.operation or t.name for t in result.tool_calls],
+                },
+            )
+        )
 
     return app
 

@@ -54,4 +54,9 @@ sequenceDiagram
     backend couldn't add anything (session ids, its own checks). OBO keeps the gateway token
     server-side, and the gateway can tell from `azp` which front end a call came through.
 
+!!! tip "Prefer a supported front end?"
+    Copilot Studio can use the gateway's agents as connected agents over A2A, with each user
+    signing in so the same limits apply. See
+    [module 12](12-copilot-studio.md).
+
 [Next: the Teams bot →](08-teams.md)

@@ -1,4 +1,4 @@
-# 12 · Wrap-up, Teams licensing, and teardown
+# 13 · Wrap-up, Teams licensing, and teardown
 
 *What you now know, how to finish Teams, and how to switch it all off.*
 
@@ -33,11 +33,12 @@ Teams needs a **member** work account in the gateway's tenant with a Teams licen
 
 !!! danger "Destructive: delete everything in Azure (irreversible)"
     APIM Standard v2, Event Hubs and the always-on runtime cost money every day the deployment
-    exists. App registrations and groups in Entra are separate and stay until you delete them.
+    exists. `terraform destroy` removes the Azure resources and the app registrations, and
+    purges the soft-deleted APIM and AI Services account so you can deploy again straight away.
+    Groups you created yourself stay until you delete them.
     ```bash
-    az group delete -n $RG
+    terraform -chdir=deploy/agent-gateway/terraform destroy
     ```
-    With Terraform, use `terraform destroy` instead: it also removes the app registrations.
 
 ??? question "Final check: trace one Teams message through every component you met."
     Teams → Azure Bot → bot container (Bot Service token) → Teams SSO token → OBO via Entra

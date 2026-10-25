@@ -6,7 +6,7 @@
     token limits, entitlements and visibility.
 
     The implementation is in [`deploy/agent-gateway/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway):
-    a policy generator, Bicep, an agent runtime, a dashboard and Entra setup. It was
+    a policy generator, Terraform, an agent runtime, a dashboard and Entra setup. It was
     deployed end to end to a pilot subscription; see [Pilot results](#pilot-results).
 
 !!! tip "Learning it hands-on"
@@ -63,6 +63,74 @@ such as a user's object id from their token, and it supports a per-minute rate, 
 quota per hour/day/week/month/year, or both. For it to see the user on **every** model
 call, the agent loop has to run somewhere that forwards the user's context. That's our
 runtime.
+
+## Why the agents are external in Foundry
+
+In the Foundry portal, `cve-triage` and `threat-brief` are marked **external**, with no model,
+instructions or tools. That's deliberate.
+
+**How they became external.** `register_agents.py` registers each agent with
+`ExternalAgentDefinition(otel_agent_id=<name>)`. For an external agent, Foundry stores only a
+registration record. It doesn't host, run or call the agent. Its **Traces** tab works by
+matching spans in the connected Application Insights whose `gen_ai.agent.id` equals that id,
+and the runtime sets that attribute on every span. So Foundry shows traces, while the model,
+instructions and tools fields stay empty.
+
+**Why not a normal Foundry agent.** The design depends on every model call passing through
+APIM carrying the user's identity, because that's how per-user, per-team and per-agent token
+limits are enforced. A standard Foundry agent (a *prompt agent*) has Foundry Agent Service run
+the loop, and its model calls go straight to the model, never through your gateway; Microsoft
+confirms this is by design ([Microsoft Q&A](https://learn.microsoft.com/answers/questions/5777255/azure-ai-foundry-does-ai-agent-service-route-model)).
+Running the loop in our own runtime means every model call goes back through APIM's model
+route with the user's context. Registering the agents as external keeps Foundry's trace view
+and trace-based evaluations without giving up that control.
+
+| | Standard Foundry agent (prompt) | Gateway agents (external) |
+|---|---|---|
+| Who runs the loop | Foundry Agent Service | The gateway runtime (Container Apps) |
+| Definition lives in | Foundry (model, instructions, tools) | `runtime/agw_runtime/agents/*.yaml` in this repository |
+| Tools | Foundry tools: MCP, OpenAPI, Code Interpreter, File Search… | secsdk operations, run inside the runtime |
+| Model calls | Direct to the deployment | Through APIM, with per-user limits, metrics and usage events |
+| Identity | An Entra Agent ID per agent | Users' Entra tokens; managed identities between services |
+| Invoked by | Foundry's Responses endpoint | The gateway's `/agents/{agent}/runs` |
+| What Foundry shows | Everything | Description, metadata and traces |
+| Per-user token limits | Not possible | Enforced on every model call |
+
+**The model deployment.** The `gpt-5-mini` deployment in the same AI Services account is
+GlobalStandard: Microsoft-hosted shared capacity billed per token (the portal may call it
+serverless or standard), as opposed to provisioned throughput. It belongs to the account, not
+to the agents: no Foundry agent references it, and the runtime reaches it only through APIM,
+because key authentication is off and only APIM's identity may call it.
+
+**What Foundry does show.** Foundry's page for an external agent has no system prompt or tools
+section, and its description is limited to 512 characters (metadata values too). So:
+
+- **The agent page** shows the description, which carries the agent's summary **and its tool
+  list**. The registration also stores metadata (model deployment, providers, `max_turns`, token
+  budgets, how to invoke it, a link to the definition, the commit it was registered from). The
+  portal may not display the metadata; the API and SDK return it.
+- **Every trace** carries the agent's configuration in the OpenTelemetry GenAI attributes
+  Foundry's trace view reads: `gen_ai.system_instructions` (the system prompt) and
+  `gen_ai.tool.definitions` (tool names and descriptions; parameters are left out to stay under
+  Application Insights' 8,192-character property limit). These are configuration, not user
+  data, so they're recorded whether or not content capture is on.
+
+Re-run `register_agents.py` after changing an agent so the page details don't go stale (each
+run adds a new revision of the registration); `--dry-run` shows what it would send.
+
+**Talking to the agents.** Foundry's playground can't run external agents: Foundry never calls
+them. Use any client of the gateway's `/agents/{agent}/runs` endpoint with an Entra token for
+the gateway: the [web chat](#clients), the CLI (`client.py run <agent> "<question>"`), the Teams
+bot, [Copilot Studio over A2A](#copilot-studio-a2a), or plain HTTP from your own app or a script
+(see [Clients](#clients)).
+
+| To see | Look at |
+|---|---|
+| Instructions, model, tool providers, budgets | `runtime/agw_runtime/agents/<agent>.yaml` |
+| Who can use it and its token limits | `gateway.yaml`: the agent's `group_id`, `tokens_per_minute`, `tokens_per_day`, `tokens_per_run` |
+| The tools behind its providers | `uv run secctl guide` |
+| What it did on each run | Foundry → the agent → **Traces**; the *run explorer* workbook; App Insights transaction search |
+| Usage, cost and users | the *Agent gateway* workbook |
 
 ## Architecture
 
@@ -142,7 +210,7 @@ sequenceDiagram
 ### The app registration
 
 One Entra app registration, **agent-gateway**, is the audience for everything.
-[`entra.sh app`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/entra.sh) creates it:
+[Terraform](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/terraform/entra.tf) creates it:
 
 | Setting | Value | Why |
 |---|---|---|
@@ -162,7 +230,7 @@ One Entra app registration, **agent-gateway**, is the audience for everything.
 | Team | `sg-team-secops`, `sg-team-itops` | Shared monthly pool and chargeback unit. Users in no team go to `default_team` |
 | Agent | `sg-agent-cve-triage` | Who may run that agent |
 
-Use **direct** membership for these groups and assign each one to the app (`entra.sh group`).
+Use **direct** membership for these groups and assign each one to the app (Terraform's `assign_config_groups` does this for every group in `gateway.yaml`).
 Assigning groups to an application requires Entra ID P1. For self-service and approvals,
 put the groups in Entra **access packages** (Entra ID Governance) with expiry and reviews.
 
@@ -265,6 +333,76 @@ sequenceDiagram
 - **App package.** `teams/package.py` builds the manifest (with `webApplicationInfo` for SSO)
   and icons into a zip to upload in Teams or the Teams admin center.
 
+### Copilot Studio (A2A)
+
+[Copilot Studio](https://learn.microsoft.com/microsoft-copilot-studio/add-agent-agent-to-agent)
+is Microsoft's supported front end for building, testing, publishing (Teams, Microsoft 365
+Copilot, a website) and analysing agents. The gateway's agents plug into it as **connected
+agents** over the open [Agent2Agent (A2A) protocol](https://a2a-protocol.org/): a Copilot Studio
+agent you build delegates to `cve-triage` or `threat-brief` when a question fits them.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant CS as Copilot Studio agent
+    participant E as Microsoft Entra ID
+    participant G as APIM /agents
+    participant R as Runtime
+    CS->>G: GET /agents/cve-triage/a2a/.well-known/agent.json (public card)
+    U->>CS: question
+    CS->>E: OAuth 2.0 sign-in (once per user): token for api://<gateway>/Agents.Invoke
+    CS->>G: POST /agents/cve-triage/a2a (JSON-RPC message/send, user's token)
+    G->>G: same checks as any run: tier, team, entitlement, runs/min
+    G->>R: message + context headers
+    R->>R: run the agent (history from Copilot Studio, session = contextId)
+    R-->>CS: A2A Message (answer, run id, tokens, tools in metadata)
+    CS-->>U: answer
+```
+
+- **The same gateway rules apply.** Copilot Studio calls the front door with each user's own
+  token, so entitlements, per-user token limits, metrics, usage events and traces are the same
+  as from the CLI or web chat. A limit shows up as a "⏳" answer in the conversation.
+- **Endpoints.** One per agent: `https://<apim>.azure-api.net/agents/<agent>/a2a`. The agent
+  card at `…/a2a/.well-known/agent.json` (and `agent-card.json`) is the only operation the
+  gateway serves without a token; it carries the agent's name, description and skills.
+- **Conversations.** Copilot Studio sends the chat history and a stable `contextId`; the runtime
+  uses the history as context and the `contextId` as the session id, so the *run explorer*
+  groups a Copilot Studio conversation like a web chat session.
+- **One secret, by Copilot Studio's design.** Its OAuth 2.0 connection requires a client
+  secret. Create it in the portal and paste it straight into Copilot Studio; rotate it on a
+  schedule. Everything else in the gateway stays secret-free.
+- **What Copilot Studio shows.** Its test canvas and analytics show its own orchestration step
+  by step, with the gateway agent as one step. The agent's own model and tool calls are in
+  Foundry's trace view and the workbooks (metadata on each answer carries the run id).
+
+**Set it up** (needs a Copilot Studio licence or trial on a **member** account in the tenant,
+and Application Administrator for step 1):
+
+1. **Create the OAuth client**: set `enable_copilot_studio = true` and apply. The
+   `copilot_studio_client_id` output is the client ID.
+2. **Create its secret**: Entra ID → App registrations → `agent-gateway-copilot-studio` →
+   Certificates & secrets → New client secret. Copy the value (shown once).
+3. **In [Copilot Studio](https://copilotstudio.microsoft.com)**, create or open an agent (for
+   example "SecOps assistant") → **Agents** → **Add agent** → **A2A agent**:
+
+    | Field | Value |
+    |---|---|
+    | Endpoint URL | `https://<apim>.azure-api.net/agents/cve-triage/a2a` (name and description fill in from the card) |
+    | Authentication | **OAuth 2.0** |
+    | Client ID / secret | from steps 1 and 2 |
+    | Authorization URL | `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize` |
+    | Token URL / Refresh URL | `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` |
+    | Scope (if asked) | `api://<gateway-app-id>/Agents.Invoke offline_access` |
+
+4. **Redirect URI**: if Copilot Studio shows a redirect URL for the connection that differs from
+   `https://global.consent.azure-apim.net/redirect`, add it to the app registration's Web
+   redirect URIs (Terraform: `copilot_studio_redirect_uris`).
+5. **Create the connection** (you sign in once), **Add and configure**, then repeat for
+   `threat-brief`.
+6. **Test** in the test canvas ("Prioritise CVE-2024-3400 and CVE-2023-4966"), then **publish**
+   to Teams, Microsoft 365 Copilot or a website.
+
 **Your gateway profile: `GET /agents/me`.** APIM answers this itself, from the values it
 just derived from the token (the runtime isn't called): user, tier and its token limits,
 team, cost center, team pool and allowed agents. Tier, team and cost center are not in
@@ -334,7 +472,7 @@ Foundry grants each deployment a TPM quota per region (GlobalStandard `gpt-5-min
 eastus2 is 1,000K TPM on the test subscription). The gateway shares it out:
 
 ```text
-deployment ceiling  (gateway, d:)  ≤  deployment capacity (Bicep)  ≤  regional quota
+deployment ceiling  (gateway, d:)  ≤  deployment capacity (Terraform)  ≤  regional quota
    400K TPM                             500K TPM                        1,000K TPM
 ```
 
@@ -346,7 +484,7 @@ deployment ceiling  (gateway, d:)  ≤  deployment capacity (Bicep)  ≤  region
 - **Monthly team pools** are a budget, not capacity: set them from cost targets.
 - For predictable heavy use, add **provisioned throughput (PTU)** as the primary backend
   and spill over to standard deployments with an APIM backend pool and circuit breaker.
-  The Bicep already sets a circuit breaker on the models backend.
+  The deployment already sets a circuit breaker on the models backend.
 
 ## Configuration
 
@@ -383,7 +521,7 @@ group by `costCenter` directly. `default_team` may have one for unassigned usage
 Limits are written into the policy XML as literals because APIM's `tokens-per-minute`
 attribute doesn't accept expressions. Names are restricted to `a-z0-9-` because they end
 up inside C# policy expressions. Environment-specific ids (tenant, app, managed
-identities) stay as APIM named values (`{{agw-…}}`) that Bicep creates.
+identities) stay as APIM named values (`{{agw-…}}`) that Terraform creates.
 
 Agent behaviour lives next to the runtime, one YAML file per agent
 ([`runtime/agw_runtime/agents/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/runtime/agw_runtime/agents)):
@@ -404,7 +542,7 @@ Four streams, each with a job, plus a dashboard on top:
 
 ### Dashboards
 
-Bicep deploys three Azure Workbooks (Azure portal → Monitor → Workbooks, or the resource
+Terraform deploys three Azure Workbooks (Azure portal → Monitor → Workbooks, or the resource
 group). They are generated by [`infra/workbooks/build.py`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/infra/workbooks/build.py),
 and `infra/workbooks/validate.py` runs every query against a live workspace before deploy.
 
@@ -419,11 +557,13 @@ The runtime's spans follow the OpenTelemetry GenAI conventions (`invoke_agent`, 
 `execute_tool`, `gen_ai.conversation.id`, `gen_ai.agent.id`), so App Insights' transaction
 view shows each run as a tree too.
 
-**Foundry trace view.** Bicep creates a Foundry project with this Application Insights
+**Foundry trace view.** Terraform creates a Foundry project with this Application Insights
 connected, and `register_agents.py` registers each agent as an **external agent** (preview).
 Foundry matches spans by `gen_ai.agent.id` (the agent name), so each agent's **Traces** tab in
 the Foundry portal shows its runs. Captured content lives in span events (below), so the
-Foundry view shows structure, tokens and latency rather than inputs.
+Foundry view shows structure, tokens and latency rather than inputs. Why the agents are
+external, and what Foundry does and doesn't show about them: see
+[Why the agents are external in Foundry](#why-the-agents-are-external-in-foundry).
 
 ### Sessions and captured content
 
@@ -431,9 +571,9 @@ Foundry view shows structure, tokens and latency rather than inputs.
   Teams bot one per Teams conversation). The front door keeps it if it matches
   `^[A-Za-z0-9-]{1,64}$`, otherwise uses the request id. It is on every span
   (`gen_ai.conversation.id`, `session.id`) and every usage event (`sessionId`).
-- **Content capture** (`AGW_CAPTURE_CONTENT=true`, on in the Bicep): the runtime records the
+- **Content capture** (`AGW_CAPTURE_CONTENT=true`, on by default): the runtime records the
   user's input and each tool call's arguments as **span events**. Azure Monitor stores span
-  events in `AppTraces`, which Bicep sets to **30 days**; spans stay at 90. Model answers and
+  events in `AppTraces`, which the deployment sets to **30 days**; spans stay at 90. Model answers and
   tool results are never recorded. Arguments listed in `AGW_REDACT_ARGS` (default
   `azure.query.query`, the Resource Graph KQL) are replaced with `[redacted]`.
 - **Names.** The front door passes the user's display name and sign-in name from the token;
@@ -451,7 +591,7 @@ Foundry view shows structure, tokens and latency rather than inputs.
 
 ### Privacy
 
-- **Model output is never stored.** Bicep turns on APIM's LLM logs (token counts per call)
+- **Model output is never stored.** The deployment turns on APIM's LLM logs (token counts per call)
   but not the separate *Log prompts* / *Log completions* options. The runtime's spans
   record operation names, outcomes and token counts; user input and tool arguments are
   span events with 30-day retention (above). secsdk's own spans record parameter **names**
@@ -521,78 +661,74 @@ Wire them to an action group (email, Teams, or a Logic App that opens a ticket).
 
 ## Deploy
 
-These are the steps the pilot used.
+[`terraform/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/terraform)
+deploys everything, Entra included: `azurerm` for most resources, `azuread` for the app
+registrations, scopes, roles, grants and federated credentials, and `azapi` where azurerm
+can't do exactly what's needed (policies sent as `xml`, Container Apps auth, APIM LLM
+logging, the Foundry App Insights connection, the secretless Bot OAuth connection). It needs
+Owner (or Contributor + User Access Administrator) on the subscription and Application
+Administrator in Entra.
 
 ```bash
-# 1. Entra: app registration, groups (put the ids in your gateway.yaml)
-cd deploy/agent-gateway
-./entra.sh app                                   # prints gatewayAppId
-./entra.sh group <app-id> sg-agents-standard     # repeat for tiers, teams and agents
+# 1. Groups for tiers, teams and agents; put their object ids in your gateway.yaml
+az ad group create --display-name sg-agents-standard --mail-nickname sg-agents-standard \
+  --query id -o tsv                               # repeat for each tier, team and agent
 
 # 2. Policies from your config, into a git-ignored folder
+cd deploy/agent-gateway
 uv run python render_policies.py build/my-gateway.yaml --out build/policies
 
-# 3. Infrastructure without the runtime (APIM Standard v2 takes a while)
-az group create -n rg-agent-gateway -l eastus2
-#    agentsPolicyXml/modelsPolicyXml default to the example policies; pass yours, e.g. in a
-#    parameters JSON file generated from build/policies/*.xml (the pilot did this)
-az deployment group create -g rg-agent-gateway -f infra/main.bicep \
-  -p publisherEmail=<platform-team-address> gatewayAppId=<app-id> -p @build/policies.parameters.json
+# 3. Infrastructure and Entra, without the containers (APIM Standard v2 takes a while).
+#    In terraform.tfvars: agents_policy_file / models_policy_file = "../build/policies/…",
+#    gateway_config_file = "../build/my-gateway.yaml", assign_config_groups = true (Entra ID P1)
+cd terraform
+cp terraform.tfvars.example terraform.tfvars      # fill in
+terraform init && terraform apply
 
-# 4. Let APIM and the runtime call each other (principal ids are deployment outputs)
-./entra.sh grant <app-id> <apimPrincipalId> <runtimePrincipalId>
+# 4. Build the images from the repo root and push them to the new registry
+cd ../../..
+R=$(terraform -chdir=deploy/agent-gateway/terraform output -raw registry_login_server)
+az acr login -n ${R%%.*}
+docker build --platform linux/amd64 -t $R/agw-runtime:0.1.0 -f deploy/agent-gateway/runtime/Dockerfile . && docker push $R/agw-runtime:0.1.0
+#    the same for chat/ (agw-chat) and teams/ (agw-teams) if you want the web chat or Teams bot
 
-# 5. Build the runtime image from the repo root, then deploy it
-cd ../..
-az acr build -r <registryName> -t agw-runtime:0.1.0 -f deploy/agent-gateway/runtime/Dockerfile .
-#    (or docker build --platform linux/amd64 … && az acr login -n <registryName> && docker push …)
-az deployment group create -g rg-agent-gateway -f deploy/agent-gateway/infra/main.bicep \
-  -p publisherEmail=<…> gatewayAppId=<app-id> -p @deploy/agent-gateway/build/policies.parameters.json \
-  -p runtimeImage=<registryLoginServer>/agw-runtime:0.1.0
+# 5. Containers, front door, web chat and Teams bot: set runtime_image (+ chat_image,
+#    teams_image and tenant_id_base64url for Teams) in terraform.tfvars, then
+terraform -chdir=deploy/agent-gateway/terraform apply
 
 # 6. Try it
-python client.py list
+export AGW_GATEWAY_URL=$(terraform -chdir=deploy/agent-gateway/terraform output -raw gateway_url)
+export AGW_GATEWAY_APP_ID=$(terraform -chdir=deploy/agent-gateway/terraform output -raw gateway_app_id)
+python deploy/agent-gateway/client.py list
 
-# 7. Web chat (OBO): app registration, image, deploy, then link the redirect URI and identity
-cd deploy/agent-gateway
-./entra.sh chat <app-id>                         # prints chatAppId, grants consent
-docker build --platform linux/amd64 -t <registryLoginServer>/agw-chat:0.1.0 -f chat/Dockerfile ../..
-docker push <registryLoginServer>/agw-chat:0.1.0
-az deployment group create … -p chatAppId=<chatAppId> chatImage=<registryLoginServer>/agw-chat:0.1.0
-./entra.sh chat-link <chatAppId> <chatUrl> <chatPrincipalId>   # outputs of the deployment
+# 7. Teams app package (upload it in the Teams admin center)
+uv run python deploy/agent-gateway/teams/package.py --app-id <teams_app_id> --bot-host <teams_bot_host>
 
-# 8. Teams bot: app registration (trusts the bot identity and the Bot token store), image,
-#    deploy, then build the app package and upload it in Teams
-./entra.sh teams <app-id> <botPrincipalId>        # prints teamsAppId
-docker build --platform linux/amd64 -t <registryLoginServer>/agw-teams:0.2.0 -f teams/Dockerfile ../..
-docker push <registryLoginServer>/agw-teams:0.2.0
-az deployment group create … -p teamsAppId=<teamsAppId> teamsImage=<registryLoginServer>/agw-teams:0.2.0
-uv run python teams/package.py --app-id <teamsAppId> --bot-host <teamsBotEndpoint host>
-
-# 9. Foundry trace view: register the agents as external agents
-uv run python register_agents.py --endpoint <foundryProjectEndpoint>
+# 8. Foundry trace view: register the agents as external agents (re-run after changing an agent)
+uv run python deploy/agent-gateway/register_agents.py --endpoint <foundry_project_endpoint> --gateway-url <gateway_url>
 ```
+
+After the first images, releases come from GitHub: the
+[release workflow](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/.github/workflows/agent-gateway-release.yml)
+builds, pushes and rolls out a new revision on an `agw-v*` tag, signed in with OIDC (no
+secret in GitHub). Set it up as described in the
+[Terraform README](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/terraform#releases-from-github).
 
 The image build context is the repo root, and `.dockerignore` is an allow-list
 (`packages/secsdk` and the runtime only), so local files such as `.env` or `.envrc`
 never reach the registry.
 
-What the Bicep creates: user-assigned identities for APIM and the runtime, APIM
-Standard v2 (named values, App Insights logger with custom metrics, Event Hubs logger,
-diagnostic settings to Log Analytics, the two APIs and their policies, a models backend
-with a circuit breaker), an AI Services (Foundry) account with key auth disabled and the
-model deployments, Event Hubs, Container Registry, a Container Apps environment and the
-runtime app with Entra-only ingress auth, the *Agent gateway* workbook, APIM LLM logs
-(token counts only), plus the role assignments.
+What it creates: the gateway, chat, Teams and (optionally) Copilot Studio app registrations;
+user-assigned identities for APIM, the runtime, the chat and the bot; APIM Standard v2 (named
+values, App Insights logger with custom metrics, Event Hubs logger, diagnostic settings to
+Log Analytics, the two APIs and their policies, a models backend with a circuit breaker); an
+AI Services (Foundry) account with key auth disabled, the model deployments and a Foundry
+project; Event Hubs; Container Registry; a Container Apps environment and the apps, with
+Entra-only ingress auth on the runtime; the workbooks; APIM LLM logs (token counts only);
+plus the role assignments.
 
-**Terraform.** [`terraform/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/terraform)
-is the equivalent of the Bicep **and** `entra.sh` in one root module: `azurerm` for most
-resources, `azuread` for the app registrations, scopes, roles, grants and federated
-credentials, and `azapi` where azurerm can't do exactly what's needed (policies sent as
-`xml`, Container Apps auth, APIM LLM logging, the Foundry App Insights connection, the
-secretless Bot OAuth connection). Two applies: the first creates everything except the
-containers, the second adds them once images are in the registry. It passes `terraform
-validate` and a full `terraform plan` (84 resources); the pilot itself was deployed with Bicep.
+`terraform destroy` removes all of it and purges the soft-deleted APIM and AI Services
+account, so the same names can be deployed again straight away.
 
 ## Decisions and alternatives
 
@@ -641,10 +777,23 @@ APIM Standard v2, `gpt-5-mini` (GlobalStandard, 500K TPM), the runtime on Contai
 | `GET /agents/me` directly and through chat OBO | ✅ tier, team, cost center, limits, agents |
 | Foundry external agents registered; project with App Insights connected | ✅ |
 | Teams bot deployed: Azure Bot, Teams channel, federated SSO connection, health | ✅ (Teams sign-in not yet tested: needs a licensed user) |
+| A2A: public agent card, 401 without a token, Copilot-Studio-shaped `message/send` with chat history and `contextId` | ✅ answer in ~24 s, session = contextId (Copilot Studio itself not yet connected: needs a licence) |
 
 Fixes found by the pilot (already in the code): the CLI client asks for `/.default`
-(the Azure CLI credential rejects named scopes); Bicep takes environment-specific policy
-XML as parameters; LLM logs and the workbook are part of the Bicep.
+(the Azure CLI credential rejects named scopes); policies are rendered per environment from
+`gateway.yaml`; LLM logs and the workbooks are part of the deployment.
+
+The pilot was deployed with Bicep, which was later replaced by Terraform. On 25 October 2026
+Terraform was proven with a full round trip in a fresh resource group: two applies (93
+resources, plus 7 for the release identity), a smoke test (public card `200`, `401` without a
+token, `403 no_tier`, user token refused on the model route, web chat up), a release through
+the GitHub workflow (OIDC, all three apps rolled out, no drift afterwards), and `terraform
+destroy` down to nothing, with no soft-deleted resources or Entra apps left behind. The round
+trip found nine problems a `plan` can't show, all fixed: an App Insights setting that hangs
+without the `Microsoft.AlertsManagement` provider, a new required field on the Container Apps
+environment, a diagnostic APIM creates by itself, policies that drifted (and, as their fix
+first stood, blocked destroy), a Teams connection Azure rewrites, GitHub's newer OIDC subject
+format, and the AI Services account rejecting its delete while it settles.
 
 Not yet tested: `403 no_tier` (needs a fresh token after leaving the tier group), team and
 agent quotas at their limits, and a 20-run load test.

@@ -7,7 +7,7 @@
 #
 # Group ids are Microsoft Entra group object ids. Groups must be assigned to the
 # "agent-gateway" enterprise application so they appear in users' tokens
-# (groupMembershipClaims = ApplicationGroup); see entra.sh.
+# (groupMembershipClaims = ApplicationGroup); Terraform's assign_config_groups does it.
 #
 # Token counts are prompt + completion tokens as reported by the model.
 

@@ -143,3 +143,43 @@ variable "tags" {
   type    = map(string)
   default = { workload = "agent-gateway" }
 }
+
+variable "enable_copilot_studio" {
+  description = "Create the OAuth client app Copilot Studio's A2A connection signs users in with."
+  type        = bool
+  default     = false
+}
+
+variable "copilot_studio_redirect_uris" {
+  description = "Redirect URIs for the Copilot Studio OAuth client; add the one Copilot Studio shows when you create the connection."
+  type        = list(string)
+  default     = ["https://global.consent.azure-apim.net/redirect"]
+}
+
+variable "foundry_users" {
+  description = "Object IDs of users or groups who work in the Foundry portal for this gateway (agent Monitor, Insights scans, evaluations). They get Foundry User on the AI Services account; the identity running Terraform always does."
+  type        = list(string)
+  default     = []
+}
+
+variable "github_repository" {
+  description = "owner/name of the GitHub repository whose release workflow may push images and roll out new container app revisions (OIDC, no secret). Empty: no GitHub deploy identity."
+  type        = string
+  default     = ""
+}
+
+variable "github_environment" {
+  description = "GitHub environment the release workflow runs in; only its tokens are trusted."
+  type        = string
+  default     = "agent-gateway"
+}
+
+variable "github_oidc_subject_prefix" {
+  description = <<-EOT
+    Subject prefix of the repository's OIDC tokens, when it isn't "repo:<owner>/<name>". Repositories
+    using GitHub's immutable subject claims have one with ids ("repo:<owner>@<id>/<name>@<id>"). Print it with:
+    gh api repos/<owner>/<name>/actions/oidc/customization/sub --jq .sub_claim_prefix
+  EOT
+  type        = string
+  default     = ""
+}

@@ -52,6 +52,12 @@ flowchart LR
     [ai.azure.com](https://ai.azure.com) → project **agents** → Agents → `cve-triage` →
     **Traces**. Foundry matches spans to the agent by `gen_ai.agent.id`.
 
+    The agents are marked **external** and show no model or tools, because Foundry only
+    holds a registration: the loop runs in the gateway runtime so every model call goes
+    through APIM with your identity. The description and metadata list the model, tools,
+    budgets and a link to the definition. See
+    [Why the agents are external in Foundry](../agent-gateway.md#why-the-agents-are-external-in-foundry).
+
 ??? question "Check: why isn't the user id a metric dimension?"
     Azure Monitor custom metrics allow 5 custom dimensions and APIM tracks at most 100 values
     per dimension, dropping the rest silently. Per-user numbers come from logs (spans and usage

@@ -34,7 +34,7 @@ sequenceDiagram
 !!! warning "You need a licensed work account"
     Teams needs a **member** account in the gateway's tenant with a Teams licence. Guest
     accounts and personal Microsoft accounts can't upload apps, and guests can't use the
-    Microsoft 365 admin center to start a trial. See [module 12](12-wrap-up.md#finish-the-teams-test).
+    Microsoft 365 admin center to start a trial. See [module 13](13-wrap-up.md#finish-the-teams-test).
 
 ## Steps
 

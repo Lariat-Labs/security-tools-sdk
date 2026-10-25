@@ -20,3 +20,6 @@ models_policy_file = "../build/policies/models-api.xml"
 
 # Needed for the Teams bot only (see the variable's description for the one-liner)
 # tenant_id_base64url = ""
+
+# Others who use the Foundry portal (Monitor, Insights scans, evaluations); you are included.
+# foundry_users = ["<user-or-group-object-id>"]

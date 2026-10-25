@@ -97,7 +97,8 @@ nav:
       - 09 Observability: field-manual/09-observability.md
       - 10 Cost and chargeback: field-manual/10-cost.md
       - 11 Infrastructure as code: field-manual/11-iac.md
-      - 12 Wrap-up and teardown: field-manual/12-wrap-up.md
+      - 12 Copilot Studio (A2A): field-manual/12-copilot-studio.md
+      - 13 Wrap-up and teardown: field-manual/13-wrap-up.md
   - Extending the SDK: extending.md
   - Reference:
       - Operations: reference/operations.md

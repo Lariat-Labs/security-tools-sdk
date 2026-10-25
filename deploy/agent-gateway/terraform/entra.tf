@@ -1,4 +1,4 @@
-# Microsoft Entra: replaces entra.sh. Needs Application Administrator (or Cloud Application
+# Microsoft Entra app registrations. Needs Application Administrator (or Cloud Application
 # Administrator) and, for assigning groups to the app, Entra ID P1.
 #
 # Ids of scopes and roles are fixed UUIDs (uuidv5), so re-applying never changes them.
@@ -284,4 +284,42 @@ resource "azuread_application_federated_identity_credential" "teams_bot_mi" {
   issuer         = local.entra_issuer
   subject        = azurerm_user_assigned_identity.bot.principal_id
   audiences      = ["api://AzureADTokenExchange"]
+}
+
+# ----- Copilot Studio OAuth client (A2A connection) --------------------------------------------
+# Copilot Studio signs each user in (authorization code) and calls the gateway with their token.
+# It needs a client secret: create it in the portal and paste it into Copilot Studio, so it never
+# lands in Terraform state. Add the exact redirect URI Copilot Studio shows when you create the
+# connection (it may be per-connector) to copilot_studio_redirect_uris.
+
+resource "azuread_application_registration" "copilot_studio" {
+  count            = var.enable_copilot_studio ? 1 : 0
+  display_name     = "${var.entra_name_prefix}-copilot-studio"
+  sign_in_audience = "AzureADMyOrg"
+}
+
+resource "azuread_application_redirect_uris" "copilot_studio" {
+  count          = var.enable_copilot_studio ? 1 : 0
+  application_id = azuread_application_registration.copilot_studio[0].id
+  type           = "Web"
+  redirect_uris  = var.copilot_studio_redirect_uris
+}
+
+resource "azuread_application_api_access" "copilot_studio_gateway" {
+  count          = var.enable_copilot_studio ? 1 : 0
+  application_id = azuread_application_registration.copilot_studio[0].id
+  api_client_id  = local.gateway_app_id
+  scope_ids      = [azuread_application_permission_scope.agents_invoke.scope_id]
+}
+
+resource "azuread_service_principal" "copilot_studio" {
+  count     = var.enable_copilot_studio ? 1 : 0
+  client_id = azuread_application_registration.copilot_studio[0].client_id
+}
+
+resource "azuread_service_principal_delegated_permission_grant" "copilot_studio" {
+  count                                = var.enable_copilot_studio ? 1 : 0
+  service_principal_object_id          = azuread_service_principal.copilot_studio[0].object_id
+  resource_service_principal_object_id = azuread_service_principal.gateway.object_id
+  claim_values                         = ["Agents.Invoke"]
 }

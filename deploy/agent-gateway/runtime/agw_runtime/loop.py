@@ -324,6 +324,10 @@ class AgentRunner:
                 "agw.cost_center": ctx.cost_center or None,
                 "agw.user.name": ctx.user_name or None,
                 "agw.user.upn": ctx.user_upn or None,
+                # The agent's configuration (not user data), in the OpenTelemetry GenAI
+                # attributes Foundry's trace view reads: external agents have no prompt or
+                # tools on their Foundry page, so each trace carries them.
+                **agent_config_attributes(agent.instructions, tools),
                 **ctx.span_attributes(agent.name),
             },
         ) as run_span:
@@ -521,6 +525,35 @@ class AgentRunner:
             ms=int((time.monotonic() - started) * 1000),
         )
         return text, record
+
+
+# Application Insights keeps at most 8,192 characters per custom property.
+MAX_ATTRIBUTE_CHARS = 8192
+
+
+def agent_config_attributes(instructions: str, tools: list[dict[str, Any]]) -> dict[str, str]:
+    """gen_ai.system_instructions and gen_ai.tool.definitions for the run span.
+
+    Tool parameters are left out so the definitions stay within the property limit; names and
+    descriptions are what a reader of the trace needs.
+    """
+    system = json.dumps([{"type": "text", "content": instructions}], ensure_ascii=False)
+    defs = [
+        {
+            "type": "function",
+            "name": t["function"]["name"],
+            "description": t["function"]["description"].split("\n\n")[0][:300],
+        }
+        for t in tools
+    ]
+    tool_json = json.dumps(defs, ensure_ascii=False)
+    while len(tool_json) > MAX_ATTRIBUTE_CHARS and defs:
+        defs = defs[:-1]
+        tool_json = json.dumps(defs, ensure_ascii=False)
+    return {
+        "gen_ai.system_instructions": system[:MAX_ATTRIBUTE_CHARS],
+        "gen_ai.tool.definitions": tool_json,
+    }
 
 
 def _envelope(result: Result, limit: int) -> str:
