@@ -51,4 +51,4 @@ flowchart LR
     (`&lt;JObject&gt;`), which must be sent as `xml`. azapi sends the exact ARM body, the same
     as the Bicep.
 
-[Next: wrap-up and teardown →](12-wrap-up.md)
+[Next: Copilot Studio (A2A) →](12-copilot-studio.md)

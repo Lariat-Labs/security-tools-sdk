@@ -81,4 +81,5 @@ terminal session: re-run the block in a new terminal.
 | 09 | [Observability](09-observability.md) | Spans, span events, workbooks, following a run |
 | 10 | [Cost and chargeback](10-cost.md) | Cost centers, usage events, cost per user |
 | 11 | [Infrastructure as code](11-iac.md) | Generators, Bicep and Terraform |
-| 12 | [Wrap-up and teardown](12-wrap-up.md) | The security model, licensing for Teams, cleaning up |
+| 12 | [Copilot Studio (A2A)](12-copilot-studio.md) | Agents as connected agents over A2A, signed in per user |
+| 13 | [Wrap-up and teardown](13-wrap-up.md) | The security model, licensing for Teams, cleaning up |

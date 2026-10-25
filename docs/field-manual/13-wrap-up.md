@@ -1,4 +1,4 @@
-# 12 · Wrap-up, Teams licensing, and teardown
+# 13 · Wrap-up, Teams licensing, and teardown
 
 *What you now know, how to finish Teams, and how to switch it all off.*
 

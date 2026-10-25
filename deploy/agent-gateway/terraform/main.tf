@@ -8,7 +8,27 @@
 # APIM LLM logging, the Foundry App Insights connection, the federated Bot OAuth connection).
 
 provider "azurerm" {
-  features {}
+  # Make `terraform destroy` complete and repeatable: names are deterministic, so anything left
+  # soft-deleted would block the next apply.
+  features {
+    api_management {
+      purge_soft_delete_on_destroy = true
+    }
+    cognitive_account {
+      purge_soft_delete_on_destroy = true
+    }
+    log_analytics_workspace {
+      permanently_delete_on_destroy = true
+    }
+    application_insights {
+      disable_generated_rule = true # no untracked "Failure Anomalies" alert in the group
+    }
+    resource_group {
+      # The group is created by this configuration and holds only the gateway, so destroy
+      # also removes anything Azure added to it on its own.
+      prevent_deletion_if_contains_resources = false
+    }
+  }
   subscription_id = var.subscription_id
 }
 

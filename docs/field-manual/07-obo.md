@@ -57,6 +57,6 @@ sequenceDiagram
 !!! tip "Prefer a supported front end?"
     Copilot Studio can use the gateway's agents as connected agents over A2A, with each user
     signing in so the same limits apply. See
-    [Copilot Studio (A2A)](../agent-gateway.md#copilot-studio-a2a).
+    [module 12](12-copilot-studio.md).
 
 [Next: the Teams bot →](08-teams.md)

@@ -34,5 +34,17 @@ Application Administrator in Entra. State contains secrets (connection strings):
 remote backend with encryption and restricted access (for example an Azure Storage
 backend with Entra auth) rather than local state.
 
+## Tear down
+
+```bash
+terraform destroy
+```
+
+This removes everything above, Entra included. The provider `features` in `main.tf` purge the
+soft-deleted APIM and AI Services account and permanently delete the Log Analytics workspace,
+because resource names are deterministic and a soft-deleted one would block the next apply.
+Deleted app registrations stay in Entra's *Deleted applications* for 30 days. They can't
+collide with a new deployment, since their identifier URIs use their own app IDs.
+
 The pilot environment was deployed with Bicep; Terraform is validated with `terraform
 validate` and a full `terraform plan` (84 resources) but has not been applied.

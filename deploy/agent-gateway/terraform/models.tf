@@ -51,6 +51,14 @@ resource "azurerm_cognitive_account_project" "agents" {
   depends_on = [azurerm_cognitive_deployment.models]
 }
 
+# Foundry's agent Monitor tab queries Application Insights as the project's managed identity.
+resource "azurerm_role_assignment" "project_reads_telemetry" {
+  scope                = azurerm_application_insights.this.id
+  role_definition_name = "Monitoring Reader"
+  principal_id         = azurerm_cognitive_account_project.agents.identity[0].principal_id
+  principal_type       = "ServicePrincipal"
+}
+
 resource "azapi_resource" "foundry_appinsights" {
   type      = "Microsoft.CognitiveServices/accounts/connections@2025-06-01"
   name      = "appinsights"

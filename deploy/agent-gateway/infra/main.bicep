@@ -80,6 +80,7 @@ var roles = {
   openAiUser: '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd' // Cognitive Services OpenAI User
   acrPull: '7f951dda-4ed3-4680-a7ca-43fe172d538d'
   eventHubsSender: '2b629674-e913-4c01-ae53-ef4638d8f975' // Azure Event Hubs Data Sender
+  monitoringReader: '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
 }
 
 // ----- identities ---------------------------------------------------------------------------
@@ -202,6 +203,17 @@ resource foundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-06-0
   }
   // One operation at a time on the account (it rejects concurrent updates).
   dependsOn: [deployments]
+}
+
+// Foundry's agent Monitor tab queries Application Insights as the project's managed identity.
+resource projectReadsTelemetry 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: appInsights
+  name: guid(appInsights.id, foundryProject.id, roles.monitoringReader)
+  properties: {
+    principalId: foundryProject.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.monitoringReader)
+  }
 }
 
 resource foundryAppInsights 'Microsoft.CognitiveServices/accounts/connections@2025-06-01' = {
