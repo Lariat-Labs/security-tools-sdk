@@ -18,7 +18,7 @@ Two policies are produced:
 Limits are written into the policy as literals because APIM's ``tokens-per-minute``
 attribute doesn't accept expressions. Environment-specific ids (tenant, app
 registration, managed identities) stay as APIM named values (``{{agw-...}}``) that
-the Bicep template creates, so the rendered files are the same in every environment
+Terraform creates, so the rendered files are the same in every environment
 that shares a gateway.yaml.
 """
 

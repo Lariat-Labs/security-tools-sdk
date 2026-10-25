@@ -36,7 +36,6 @@ deploy/azure-functions/.python_packages/
 .envrc
 
 # agent gateway: local parameter files and rendered policies for real environments
-deploy/agent-gateway/infra/*.local.bicepparam
 deploy/agent-gateway/build/
 
 # terraform: provider cache, state and real variable files (state contains secrets)

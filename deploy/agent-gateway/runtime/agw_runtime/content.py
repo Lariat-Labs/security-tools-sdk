@@ -4,7 +4,7 @@ Spans carry metadata only (who, which agent, tokens, tool names, outcomes, timin
 When ``AGW_CAPTURE_CONTENT=true``, the runtime also records the user's input and each
 tool call's arguments as **span events**. Azure Monitor stores span events in the
 ``AppTraces`` table, linked to their span, so content can have a shorter retention
-than the spans themselves (30 days vs 90 in the Bicep).
+than the spans themselves (30 days vs 90 in the deployment).
 
 Model outputs and tool results are never recorded.
 

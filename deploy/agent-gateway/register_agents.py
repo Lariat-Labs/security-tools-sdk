@@ -9,7 +9,7 @@
 Foundry stores only a registration record; it doesn't host or call the agents. The
 runtime sets ``gen_ai.agent.id`` to the agent name on every span, and Foundry's agent
 **Traces** tab shows the spans whose ``gen_ai.agent.id`` matches the registration. The
-project must have this deployment's Application Insights connected (the Bicep does it).
+project must have this deployment's Application Insights connected (Terraform does it).
 
 The registration carries a description and metadata built from each agent's YAML (model
 deployment, tools, budgets, how to invoke it, a link to its definition and the commit it

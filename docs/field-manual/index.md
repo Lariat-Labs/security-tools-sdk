@@ -21,9 +21,8 @@ It takes about three hours end to end. You can stop after any module.
 
 ## Prerequisites
 
-1. **A deployed gateway.** Follow [Agent gateway → Deploy](../agent-gateway.md#deploy) with
-   Bicep, or [`deploy/agent-gateway/terraform`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/terraform)
-   with Terraform. The web chat and Teams bot are optional; modules 07 and 08 need them.
+1. **A deployed gateway.** Follow [Agent gateway → Deploy](../agent-gateway.md#deploy)
+   ([`deploy/agent-gateway/terraform`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/terraform)). The web chat and Teams bot are optional; modules 07 and 08 need them.
 2. **Your account in the gateway's groups**: one tier group, one team group, and at least
    one agent group, all assigned to the gateway app.
 3. **Tools**: the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) signed in
@@ -80,6 +79,6 @@ terminal session: re-run the block in a new terminal.
 | 08 | [The Teams bot](08-teams.md) | Teams SSO, two federated credentials, proactive replies |
 | 09 | [Observability](09-observability.md) | Spans, span events, workbooks, following a run |
 | 10 | [Cost and chargeback](10-cost.md) | Cost centers, usage events, cost per user |
-| 11 | [Infrastructure as code](11-iac.md) | Generators, Bicep and Terraform |
+| 11 | [Infrastructure as code](11-iac.md) | Generators, Terraform, releases with GitHub OIDC |
 | 12 | [Copilot Studio (A2A)](12-copilot-studio.md) | Agents as connected agents over A2A, signed in per user |
 | 13 | [Wrap-up and teardown](13-wrap-up.md) | The security model, licensing for Teams, cleaning up |

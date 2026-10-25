@@ -37,8 +37,8 @@ sequenceDiagram
 | `contextId` | Copilot Studio's id for a conversation. The runtime uses it as the session id, so the run explorer groups a Copilot Studio conversation together. |
 
 !!! note "Needs the Copilot Studio client"
-    The OAuth client app exists only if you deployed with `enable_copilot_studio = true`
-    (Terraform) or created it with `entra.sh`. The A2A endpoints work either way.
+    The OAuth client app exists only if you deployed with `enable_copilot_studio = true`.
+    The A2A endpoints work either way.
 
 ## Steps
 

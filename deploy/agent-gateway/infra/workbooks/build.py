@@ -1,4 +1,4 @@
-"""Generate the Azure Workbook definitions deployed by main.bicep.
+"""Generate the Azure Workbook definitions deployed by Terraform (terraform/monitoring.tf).
 
     uv run python deploy/agent-gateway/infra/workbooks/build.py          # write *.json
     uv run python deploy/agent-gateway/infra/workbooks/build.py --check  # CI: fail if stale
@@ -68,7 +68,7 @@ def query(
             "title": title,
             "queryType": 0,
             "resourceType": "microsoft.operationalinsights/workspaces",
-            # Replaced with the workspace id by main.bicep, so every query runs against the
+            # Replaced with the workspace id by Terraform, so every query runs against the
             # right workspace however the workbook is opened.
             "crossComponentResources": [WORKSPACE],
             "visualization": viz,

@@ -1,22 +1,22 @@
-# 11 · Infrastructure as code: Bicep and Terraform
+# 11 · Infrastructure as code: Terraform and releases
 
-*How the whole thing is described, generated and deployed.*
+*How the whole thing is described, generated, deployed and released.*
 
 Three generators feed the deployment: `render_policies.py` (gateway.yaml → APIM policy XML),
-`infra/workbooks/build.py` (→ workbook JSON) and `teams/package.py` (→ Teams app zip). You can
-deploy with **Bicep** (`infra/main.bicep`) plus `entra.sh` for the app registrations, or with
-**Terraform** (`terraform/`), which does both in one: `azurerm` for resources, `azuread` for
-Entra, `azapi` where azurerm can't express something exactly.
+`infra/workbooks/build.py` (→ workbook JSON) and `teams/package.py` (→ Teams app zip).
+**Terraform** (`terraform/`) deploys Azure and Entra in one root module: `azurerm` for
+resources, `azuread` for Entra, `azapi` where azurerm can't express something exactly. After
+the first images, a **GitHub Actions release workflow** builds and rolls out new images,
+signed in to Azure with OIDC instead of a secret.
 
 ```mermaid
 flowchart LR
     Y["gateway.yaml"] --> R["render_policies.py"] --> X["policies/*.xml"]
     B["workbooks/build.py"] --> W["workbooks/*.json"]
-    X & W --> BI["Bicep"] & TF["Terraform"]
-    BI --> AZ[("Azure")]
-    TF --> AZ
+    X & W --> TF["Terraform"]
+    TF --> AZ[("Azure")]
     TF --> EN[("Entra")]
-    S["entra.sh"] --> EN
+    T["agw-v* tag"] --> GH["release workflow (OIDC)"] --> ACR[("registry")] --> CA[("Container Apps revision")]
 ```
 
 ## Steps
@@ -44,11 +44,24 @@ flowchart LR
     ```bash
     uv run pytest -q
     ```
-    About 180 tests, all offline, in a few seconds.
+    About 200 tests, all offline, in a few seconds.
+
+!!! info "Look: the release workflow and the identity it signs in as"
+    ```bash
+    sed -n '1,40p' .github/workflows/agent-gateway-release.yml
+    sed -n '1,30p' deploy/agent-gateway/terraform/github.tf
+    ```
+    The workflow asks GitHub for an OIDC token (`id-token: write`). Entra exchanges it only
+    if its subject names this repository's `agent-gateway` environment, and the identity can
+    push images and update the three container apps, nothing else.
+
+??? question "Check: why does Terraform ignore the container image after the first apply?"
+    The release workflow owns the image from then on. If Terraform also managed it, the next
+    `terraform apply` would roll every app back to the image in `terraform.tfvars`.
 
 ??? question "Check: why do policies go through azapi instead of azurerm's api_policy?"
     azurerm sends policies as `rawxml`; the generator emits properly escaped XML
     (`&lt;JObject&gt;`), which must be sent as `xml`. azapi sends the exact ARM body, the same
-    as the Bicep.
+    as the REST API documents it.
 
 [Next: Copilot Studio (A2A) →](12-copilot-studio.md)

@@ -1,4 +1,4 @@
-# Microsoft Entra: replaces entra.sh. Needs Application Administrator (or Cloud Application
+# Microsoft Entra app registrations. Needs Application Administrator (or Cloud Application
 # Administrator) and, for assigning groups to the app, Entra ID P1.
 #
 # Ids of scopes and roles are fixed UUIDs (uuidv5), so re-applying never changes them.
