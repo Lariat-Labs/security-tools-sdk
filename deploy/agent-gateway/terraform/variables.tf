@@ -133,6 +133,12 @@ variable "capture_content" {
   default     = true
 }
 
+variable "capture_conversation" {
+  description = "Record each run's user input and final agent reply on its span (OpenTelemetry gen_ai.input/output.messages) for Foundry's conversation view. Model output is stored with the spans, 90 days."
+  type        = bool
+  default     = false
+}
+
 variable "sec_user_agent" {
   description = "SEC requires a User-Agent with a contact address for EDGAR requests."
   type        = string
@@ -154,6 +160,17 @@ variable "copilot_studio_redirect_uris" {
   description = "Redirect URIs for the Copilot Studio OAuth client; add the one Copilot Studio shows when you create the connection."
   type        = list(string)
   default     = ["https://global.consent.azure-apim.net/redirect"]
+}
+
+variable "gateway_groups" {
+  description = "Entra security groups to create for gateway.yaml's tiers, teams and agents, keyed by a name of your choice (see groups.tf). members are user object IDs; include_deployer adds the identity running Terraform. Empty: bring your own groups."
+  type = map(object({
+    display_name     = string
+    description      = optional(string, "")
+    members          = optional(list(string), [])
+    include_deployer = optional(bool, true)
+  }))
+  default = {}
 }
 
 variable "foundry_users" {

@@ -337,6 +337,8 @@ class AgentRunner:
                 **ctx.span_attributes(agent.name),
             },
         ) as run_span:
+            if run_span is not None and content.conversation_enabled():
+                run_span.set_attribute("gen_ai.input.messages", content.input_messages(user_input))
             if run_span is not None and content.capture_enabled():
                 run_span.add_event(
                     "agw.user_input",
@@ -395,6 +397,11 @@ class AgentRunner:
                     "agw.tool_calls": len(result.tool_calls),
                 },
             )
+            if run_span is not None and content.conversation_enabled():
+                run_span.set_attribute(
+                    "gen_ai.output.messages",
+                    content.output_messages(result.output, result.stop_reason),
+                )
         return result
 
     def _complete(

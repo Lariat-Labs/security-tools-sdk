@@ -72,6 +72,7 @@ resource "azurerm_container_app" "runtime" {
           OTEL_SERVICE_NAME                     = "agent-gateway-runtime"
           OTEL_TRACES_SAMPLER                   = local.otel_always_on.value
           AGW_CAPTURE_CONTENT                   = var.capture_content ? "true" : "false"
+          AGW_CAPTURE_CONVERSATION              = var.capture_conversation ? "true" : "false"
           AGW_OBO_CLIENT_IDS = join(",", compact([
             local.deploy_chat ? azuread_application_registration.chat[0].client_id : "",
             local.deploy_teams ? azuread_application_registration.teams[0].client_id : "",

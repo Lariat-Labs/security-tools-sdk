@@ -333,6 +333,30 @@ sequenceDiagram
 - **App package.** `teams/package.py` builds the manifest (with `webApplicationInfo` for SSO)
   and icons into a zip to upload in Teams or the Teams admin center.
 
+### Test from the Azure portal
+
+The agents API can be called from its **Test** tab in the Azure portal with your own token.
+The Test tab doesn't sign you in itself: an OAuth 2.0 authorization server in APIM only adds
+a sign-in button to the developer portal, which Standard v2 doesn't have unless you enable it.
+So paste the token as a header:
+
+1. Copy a token for the gateway (it lasts about an hour):
+
+    ```bash
+    APP_ID=$(terraform -chdir=deploy/agent-gateway/terraform output -raw gateway_app_id)
+    echo "Bearer $(az account get-access-token --scope api://$APP_ID/Agents.Invoke --query accessToken -o tsv)" | pbcopy
+    ```
+
+2. In the Azure portal: **APIM → APIs → Agent gateway: agents → an operation → Test**.
+   Select **+ Add header**, name it `Authorization` and paste the value.
+3. Send **GET /me** first: it returns your tier, team, cost center, agents and limits.
+   **POST /{agent}/runs** with `{"input": "..."}` runs an agent.
+
+The agents policy validates the token like any other, so you need the usual tier and agent
+groups, and your limits apply. The Trace pane stays empty for this API (the response has no
+`Apim-Trace-Id`); use App Insights or the run explorer workbook instead. The models API can't be
+tested this way: it accepts only the APIM and runtime managed identities.
+
 ### Copilot Studio (A2A)
 
 [Copilot Studio](https://learn.microsoft.com/microsoft-copilot-studio/add-agent-agent-to-agent)
@@ -573,9 +597,15 @@ external, and what Foundry does and doesn't show about them: see
   (`gen_ai.conversation.id`, `session.id`) and every usage event (`sessionId`).
 - **Content capture** (`AGW_CAPTURE_CONTENT=true`, on by default): the runtime records the
   user's input and each tool call's arguments as **span events**. Azure Monitor stores span
-  events in `AppTraces`, which the deployment sets to **30 days**; spans stay at 90. Model answers and
-  tool results are never recorded. Arguments listed in `AGW_REDACT_ARGS` (default
+  events in `AppTraces`, which the deployment sets to **30 days**; spans stay at 90. Tool results are
+  never recorded, and model answers only with conversation capture (next). Arguments listed in `AGW_REDACT_ARGS` (default
   `azure.query.query`, the Resource Graph KQL) are replaced with `[redacted]`.
+- **Conversation capture** (`capture_conversation` in Terraform, `AGW_CAPTURE_CONVERSATION=true`,
+  off by default): each run's user input and final agent reply go on its `invoke_agent` span as
+  `gen_ai.input.messages` and `gen_ai.output.messages` (OpenTelemetry GenAI format, up to 4,000
+  characters each). That fills the conversation view of a trace in Foundry, which otherwise says
+  *No conversation turns found*. These are span attributes, so model answers are kept as long as
+  spans (90 days), not 30. Turn it on only where storing answers is acceptable.
 - **Names.** The front door passes the user's display name and sign-in name from the token;
   runs record them (`agw.user.name`, `agw.user.upn`) so dashboards show people, not object ids.
 - **Sampling.** `azure-monitor-opentelemetry` defaults to a rate-limited sampler (5 traces
@@ -673,6 +703,9 @@ Administrator in Entra.
 # 1. Groups for tiers, teams and agents; put their object ids in your gateway.yaml
 az ad group create --display-name sg-agents-standard --mail-nickname sg-agents-standard \
   --query id -o tsv                               # repeat for each tier, team and agent
+#    or let Terraform create them: set gateway_groups in terraform.tfvars, then
+#    terraform -chdir=deploy/agent-gateway/terraform apply -target=azuread_group.gateway
+#    terraform -chdir=deploy/agent-gateway/terraform output gateway_group_ids
 
 # 2. Policies from your config, into a git-ignored folder
 cd deploy/agent-gateway
@@ -729,6 +762,25 @@ plus the role assignments.
 
 `terraform destroy` removes all of it and purges the soft-deleted APIM and AI Services
 account, so the same names can be deployed again straight away.
+
+### Linking APIM as Foundry's AI Gateway
+
+The instance qualifies as a Foundry AI Gateway (Foundry → **Manage → AI Gateway → Add AI
+Gateway → Use existing**; then **Add project to gateway** for existing projects). Linking it:
+
+- **Switches APIM's managed identity to system-assigned only, detaching `id-agw-apim`.**
+  Our policies call the runtime and Foundry with that identity, so every gateway call returns
+  500 until it's back. Terraform declares both identities (`SystemAssigned, UserAssigned`), so
+  a `terraform apply` after linking restores ours and keeps Foundry's, which Foundry grants
+  Cognitive Services User on the AI Services account.
+- **Adds its own API, backend, product and subscription**, named after the AI Services account.
+  It leaves our APIs, policies, named values and the service policy alone. Terraform doesn't
+  manage those objects and doesn't touch them.
+- **Resets the token-limit counters.** They started from zero after the identity fix in our test, so
+  expect users' minute, day and month counts to reset when the instance is updated this way.
+
+Our runtime keeps using our models API; Foundry's gateway API is for traffic through the
+Foundry project (its per-project limits) and for custom agent registration.
 
 ### Run the runtime container locally
 

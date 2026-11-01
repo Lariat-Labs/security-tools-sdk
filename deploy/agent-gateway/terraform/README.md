@@ -6,6 +6,7 @@ images exist) the runtime, web chat and Teams bot.
 | File | What |
 |---|---|
 | `entra.tf` | Gateway, chat and Teams app registrations, scopes, roles, grants, federated credentials (azuread) |
+| `groups.tf` | Optional tier, team and agent groups (`gateway_groups`), for `gateway.yaml` |
 | `identity.tf` | User-assigned managed identities |
 | `models.tf` | AI Services (Foundry) account, model deployments, Foundry project + App Insights connection |
 | `apim.tf` | APIM Standard v2, named values, loggers, diagnostics, backends, both APIs and their policies |

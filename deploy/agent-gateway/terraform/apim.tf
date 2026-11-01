@@ -5,8 +5,11 @@ resource "azurerm_api_management" "this" {
   publisher_name      = var.publisher_name
   publisher_email     = var.publisher_email
   sku_name            = "StandardV2_1"
+  # The policies use the user-assigned identity (Foundry and runtime calls). The system-assigned
+  # one is for Foundry's AI Gateway: linking the instance in Foundry switches it to
+  # SystemAssigned only (detaching ours) and grants that identity on the AI Services account.
   identity {
-    type         = "UserAssigned"
+    type         = "SystemAssigned, UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.apim.id]
   }
   tags = var.tags

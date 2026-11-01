@@ -464,6 +464,47 @@ def test_content_capture_records_input_and_tool_arguments(spans, monkeypatch):
     assert args.attributes["agw.run_id"] == "run-s"
 
 
+def test_conversation_capture_records_input_and_reply_for_foundry(spans, monkeypatch):
+    monkeypatch.delenv("AGW_CAPTURE_CONTENT", raising=False)
+    monkeypatch.setenv("AGW_CAPTURE_CONVERSATION", "true")
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s", session="conv-3")
+    _run_with_tool(ctx)
+    ours = _ours(spans)
+    run = next(s for s in ours if s.name.startswith("invoke_agent"))
+    assert json.loads(run.attributes["gen_ai.input.messages"]) == [
+        {"role": "user", "parts": [{"type": "text", "content": "Is CVE-2023-4966 exploited?"}]}
+    ]
+    assert json.loads(run.attributes["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": "done"}],
+            "finish_reason": "stop",
+        }
+    ]
+    assert not run.events  # independent of AGW_CAPTURE_CONTENT
+    # Only the run span carries the conversation; tool results are never recorded.
+    others = [s for s in ours if s is not run]
+    assert others and not any("gen_ai.output.messages" in s.attributes for s in others)
+
+
+def test_conversation_is_off_by_default(spans, monkeypatch):
+    monkeypatch.delenv("AGW_CAPTURE_CONVERSATION", raising=False)
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s", session="conv-4")
+    _run_with_tool(ctx)
+    for s in _ours(spans):
+        assert "gen_ai.input.messages" not in s.attributes
+        assert "gen_ai.output.messages" not in s.attributes
+
+
+def test_conversation_messages_are_truncated_and_mark_unfinished_runs():
+    from agw_runtime import content
+
+    long = json.loads(content.input_messages("x" * 10_000))[0]["parts"][0]["content"]
+    assert len(long) == content.MAX_CHARS and long.endswith("…")
+    out = json.loads(content.output_messages("partial", "budget_exhausted"))[0]
+    assert out["finish_reason"] == "length"
+
+
 def test_sensitive_tool_arguments_are_redacted(spans, monkeypatch):
     monkeypatch.setenv("AGW_CAPTURE_CONTENT", "true")
     ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s")
@@ -577,3 +618,30 @@ def test_agent_config_attributes_stay_under_the_property_limit():
     tools = [{"function": {"name": f"tool_{i}", "description": "d" * 400}} for i in range(100)]
     attrs = agent_config_attributes("x" * 20000, tools)
     assert all(len(v) <= MAX_ATTRIBUTE_CHARS for v in attrs.values())
+
+
+def test_request_span_carries_agent_ids_for_foundry(spans):
+    """Foundry finds an external agent's traces from request spans with gen_ai.agent.id."""
+    from fastapi.testclient import TestClient
+    from opentelemetry import trace
+
+    from agw_runtime.app import create_app
+
+    app = create_app(AgentRunner(FakeModel(reply("ok"))), {"cve-triage": agent(name="cve-triage")})
+    tracer = trace.get_tracer("test-server")
+
+    async def instrumented(scope, receive, send):  # stands in for the ASGI instrumentation
+        if scope["type"] != "http":
+            return await app(scope, receive, send)
+        with tracer.start_as_current_span("POST /agents/{agent}/runs", kind=trace.SpanKind.SERVER):
+            await app(scope, receive, send)
+
+    res = TestClient(instrumented).post(
+        "/agents/cve-triage/runs", json={"input": "hi"}, headers={**HEADERS, "x-agw-session": "conv-7"}
+    )
+    assert res.status_code == 200
+    server = [s for s in spans.get_finished_spans() if s.kind == trace.SpanKind.SERVER][-1]
+    assert server.attributes["gen_ai.agent.id"] == "cve-triage"
+    assert server.attributes["gen_ai.agent.name"] == "cve-triage"
+    assert server.attributes["gen_ai.conversation.id"] == "conv-7"
+    assert server.attributes["agw.run_id"] == "run-9"

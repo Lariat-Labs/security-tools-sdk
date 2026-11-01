@@ -73,3 +73,8 @@ output "github_variables" {
     AGW_APPS              = jsonencode(keys(local.container_apps))
   } : {}
 }
+
+output "gateway_group_ids" {
+  description = "Object IDs of the groups created from gateway_groups, to put in gateway.yaml."
+  value       = { for k, g in azuread_group.gateway : k => g.object_id }
+}
