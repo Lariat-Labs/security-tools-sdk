@@ -2998,6 +2998,7 @@ examples = [
 gateway = [
     { name = "azure-ai-projects" },
     { name = "azure-identity" },
+    { name = "azure-monitor-opentelemetry" },
     { name = "fastapi" },
     { name = "microsoft-agents-activity" },
     { name = "microsoft-agents-authentication-msal" },
@@ -3034,6 +3035,7 @@ examples = [
 gateway = [
     { name = "azure-ai-projects", specifier = ">=2.3.0" },
     { name = "azure-identity", specifier = ">=1.26.0" },
+    { name = "azure-monitor-opentelemetry", specifier = ">=1.6" },
     { name = "fastapi", specifier = ">=0.162.0" },
     { name = "microsoft-agents-activity", specifier = "==1.8.0" },
     { name = "microsoft-agents-authentication-msal", specifier = "==1.8.0" },

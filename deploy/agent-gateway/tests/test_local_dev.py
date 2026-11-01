@@ -172,6 +172,32 @@ def test_run_local_keeps_the_token_off_the_command_line(monkeypatch):
     )
     passed = [docker_cmd[i + 1] for i, a in enumerate(docker_cmd) if a == "-e"]
     assert {"AGW_DEV_ACCESS_TOKEN", "APPLICATIONINSIGHTS_CONNECTION_STRING"} <= set(passed)
+    assert "AGW_CAPTURE_CONVERSATION" not in passed  # content capture stays opt-in
+
+
+def test_run_local_passes_conversation_capture(monkeypatch):
+    import run_local
+
+    calls = []
+
+    class Done:
+        returncode = 0
+        stdout = fresh()
+        stderr = ""
+
+    monkeypatch.setattr(run_local.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        run_local.subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)) or Done()
+    )
+    monkeypatch.delenv("AGW_CAPTURE_CONVERSATION", raising=False)
+    monkeypatch.setenv("AGW_CAPTURE_CONTENT", "true")
+    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=x")
+    run_local.main(["--endpoint", "https://ais.services.ai.azure.com", "--conversation"])
+
+    docker_cmd, docker_kwargs = calls[-1]
+    passed = [docker_cmd[i + 1] for i, a in enumerate(docker_cmd) if a == "-e"]
+    assert {"AGW_CAPTURE_CONVERSATION", "AGW_CAPTURE_CONTENT"} <= set(passed)
+    assert docker_kwargs["env"]["AGW_CAPTURE_CONVERSATION"] == "true"
 
 
 # ----- client.py --local -----------------------------------------------------------------------

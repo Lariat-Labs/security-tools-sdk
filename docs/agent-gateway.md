@@ -855,7 +855,26 @@ Things to know:
   per turn. The adapter sends the last 40 turns.
 - With `--local` there are no gateway limits, as with `client.py --local`.
 - Set `APPLICATIONINSIGHTS_CONNECTION_STRING` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to trace
-  the adapter as `agent-gateway-webui-local`. It passes `traceparent` on to APIM.
+  the adapter as `agent-gateway-webui-local`. It passes `traceparent` on, so each chat turn
+  is one trace with APIM and the runtime.
+
+**Tracing without APIM.** With `--local`, set the connection string for both processes. Each
+turn is then one trace from the adapter through the local runtime
+(`agent-gateway-runtime-local`) to Foundry, with the same `gen_ai.agent.id` attributes as in
+Azure, so the runs also show in Foundry's Traces tab for the agent:
+
+```bash
+export APPLICATIONINSIGHTS_CONNECTION_STRING=$(az monitor app-insights component show \
+  -a <app-insights-name> -g <resource-group> --query connectionString -o tsv)
+uv run python deploy/agent-gateway/run_local.py --build --conversation   # terminal 1
+make webui-local                                                         # terminal 2
+```
+
+`--conversation` records each run's input and final reply on its `invoke_agent` span
+(`gen_ai.input.messages` / `gen_ai.output.messages`, as `AGW_CAPTURE_CONVERSATION=true` does
+in Azure), which Foundry's conversation view reads. Without it the view says *No conversation
+turns found*. `run_local.py` also passes `AGW_CAPTURE_CONTENT` and `AGW_REDACT_ARGS` through
+when they're set.
 
 ## Decisions and alternatives
 

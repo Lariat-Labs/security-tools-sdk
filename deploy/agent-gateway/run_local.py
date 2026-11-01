@@ -30,6 +30,8 @@ REPO_ROOT = HERE.parents[1]
 SCOPE = "https://cognitiveservices.azure.com/.default"
 IMAGE = "agw-runtime:local"
 CONTAINER = "agw-runtime-local"
+# Content-capture settings passed to the container when set here (agw_runtime/content.py).
+CAPTURE_VARS = ("AGW_CAPTURE_CONVERSATION", "AGW_CAPTURE_CONTENT", "AGW_REDACT_ARGS")
 
 
 def model_base_url(endpoint: str) -> str:
@@ -92,6 +94,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8000, help="Local port (default: 8000)")
     ap.add_argument("--image", default=IMAGE, help=f"Image to run (default: {IMAGE})")
     ap.add_argument("--build", action="store_true", help="Build the image from this checkout first")
+    ap.add_argument(
+        "--conversation",
+        action="store_true",
+        help="record each run's input and reply on its trace, for Foundry's conversation view "
+        "(AGW_CAPTURE_CONVERSATION=true)",
+    )
     args = ap.parse_args(argv)
 
     if not shutil.which("docker"):
@@ -133,7 +141,15 @@ def main(argv: list[str] | None = None) -> int:
         "OTEL_SERVICE_NAME",
         *telemetry_vars,
     ]
+    # What the runtime records beyond metadata (see agw_runtime/content.py), as in Azure.
+    if args.conversation:
+        env["AGW_CAPTURE_CONVERSATION"] = "true"
+    capture_vars = [name for name in CAPTURE_VARS if env.get(name)]
+    passed += capture_vars
     telemetry = "on" if telemetry_vars else "off (set APPLICATIONINSIGHTS_CONNECTION_STRING)"
+    if telemetry_vars:
+        conversation = env.get("AGW_CAPTURE_CONVERSATION", "").lower() in ("1", "true", "yes", "on")
+        telemetry += " · conversation: " + ("on" if conversation else "off (--conversation)")
 
     print(f"▶ {args.image} on http://127.0.0.1:{args.port}  →  {base_url}", file=sys.stderr)
     print(f"  token: about 1 hour, re-run to refresh · telemetry: {telemetry}", file=sys.stderr)

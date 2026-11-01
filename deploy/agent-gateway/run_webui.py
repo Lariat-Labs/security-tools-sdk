@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sys.path.insert(0, str(HERE / "webui"))
     import uvicorn
-    from agw_webui.app import _app_from_env
+    from agw_webui.app import app as adapter_app  # built on import from the env set above
 
     print(f"▶ agents: {target}", file=sys.stderr)
     if started:
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     try:
-        uvicorn.run(_app_from_env(), host="127.0.0.1", port=args.adapter_port, log_level="warning")
+        uvicorn.run(adapter_app, host="127.0.0.1", port=args.adapter_port, log_level="warning")
     finally:
         if started:
             subprocess.run(
