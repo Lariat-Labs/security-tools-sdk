@@ -766,6 +766,45 @@ What's different from Azure:
   the same spans and `gen_ai.agent.id` as in Azure; that attribute is what Foundry's trace
   view matches on.
 
+### Chat in Open WebUI locally
+
+[`run_webui.py`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/run_webui.py)
+starts [Open WebUI](https://openwebui.com) in Docker with a small OpenAI-compatible adapter
+([`webui/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/webui))
+in front of the agents API. Each agent is a model in the picker; each chat turn is one run.
+
+```bash
+az login
+uv run python deploy/agent-gateway/run_webui.py            # deployed gateway, as you
+uv run python deploy/agent-gateway/run_webui.py --local    # runtime from run_local.py
+# open http://127.0.0.1:3000; Ctrl-C stops both (chats stay in the agw-webui-data volume)
+```
+
+By default the adapter calls the deployed agents API with your Azure CLI token, the same
+way `client.py` does. APIM applies your tier's limits, and the run produces the same token
+metrics, usage events and traces as a Teams or Copilot Studio run. Open WebUI's chat id
+becomes the gateway session, so one conversation's runs group together in the run explorer.
+The gateway URL and app id come from `AGW_GATEWAY_URL` / `AGW_GATEWAY_APP_ID`, else from
+Terraform outputs.
+
+Each reply's thinking panel shows the tools called (with outcome and time), the tokens
+used and the tokens you have left (this minute, today, this month, your team's pool),
+read from the gateway's `x-agw-*-remaining` headers. A limit hit comes back as a chat
+reply (`⏳ … Try again in 20 seconds.`) rather than an error.
+
+Things to know:
+
+- Open WebUI runs without sign-in and everyone who opens it acts as you, so it binds to
+  `127.0.0.1` only. The adapter also binds to `127.0.0.1` and only accepts a per-start key
+  that it hands to Open WebUI.
+- Open WebUI's background model calls (titles, tags, follow-ups, autocomplete) are turned
+  off: each one would run an agent and spend your tokens.
+- History is resent each turn (the runtime keeps no state), so long chats cost more tokens
+  per turn. The adapter sends the last 40 turns.
+- With `--local` there are no gateway limits, as with `client.py --local`.
+- Set `APPLICATIONINSIGHTS_CONNECTION_STRING` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to trace
+  the adapter as `agent-gateway-webui-local`. It passes `traceparent` on to APIM.
+
 ## Decisions and alternatives
 
 | Decision | Chosen | Alternatives considered |

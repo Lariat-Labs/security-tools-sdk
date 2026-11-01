@@ -18,6 +18,7 @@ steps are in [docs/agent-gateway.md](../../docs/agent-gateway.md).
 | `register_agents.py` | Registers the agents as Foundry external agents (trace view) |
 | `client.py` | Call the gateway as yourself (`az login`); `--local` calls a local runtime container |
 | `run_local.py` | Run the runtime container on your machine against Foundry, with a short-lived token ([how](../../docs/agent-gateway.md#run-the-runtime-container-locally)) |
+| `run_webui.py`, `webui/` | Chat with the agents in Open WebUI on your machine, through the deployed gateway (your real limits) or a local runtime ([how](../../docs/agent-gateway.md#chat-in-open-webui-locally)) |
 | `tests/` | Offline tests: `uv run pytest deploy/agent-gateway` |
 
 Status: proposal, validated end to end in a pilot deployment (see *Pilot results* in the doc).
