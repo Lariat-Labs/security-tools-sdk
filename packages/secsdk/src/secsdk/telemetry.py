@@ -242,7 +242,11 @@ def configure(service_name: str = "secsdk") -> str | None:
                 stacklevel=2,
             )
             return None
-        configure_azure_monitor()
+        # The distro's default sampler (1.8+) keeps about 5 spans a second, which cuts an
+        # agent run (dozens of spans in seconds) into partial traces. Keep every span
+        # unless OTEL_TRACES_SAMPLER chooses a sampler.
+        sampling = {} if os.environ.get("OTEL_TRACES_SAMPLER") else {"sampling_ratio": 1.0}
+        configure_azure_monitor(**sampling)
         _configured = True
         atexit.register(_shutdown)
         return "azure-monitor"

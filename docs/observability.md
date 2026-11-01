@@ -83,7 +83,10 @@ flowchart LR
 1. **Create a workspace-based Application Insights resource** and copy its connection string.
 2. **Send telemetry:** set `APPLICATIONINSIGHTS_CONNECTION_STRING` wherever secctl, your agents
    or the Function App run. In Azure Functions, use the platform settings described in
-   [Deploy to Azure](deploy-azure.md#telemetry) instead.
+   [Deploy to Azure](deploy-azure.md#telemetry) instead. Every span is kept: `configure()`
+   turns off the Azure Monitor distro's default sampler (about 5 spans a second), which
+   would cut agent runs into partial traces. To sample, set `OTEL_TRACES_SAMPLER` (for
+   example `microsoft.rate_limited` with `OTEL_TRACES_SAMPLER_ARG=5`).
 3. **Query it** in Log Analytics. Azure Monitor stores client and internal spans in
    `AppDependencies` (internal spans have `DependencyType == "InProc"`), and metrics in
    `AppMetrics`. Span attributes are in the `Properties` column.
