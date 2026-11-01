@@ -621,27 +621,20 @@ def test_agent_config_attributes_stay_under_the_property_limit():
 
 
 def test_request_span_carries_agent_ids_for_foundry(spans):
-    """Foundry finds an external agent's traces from request spans with gen_ai.agent.id."""
-    from fastapi.testclient import TestClient
-    from opentelemetry import trace
+    """Foundry finds an external agent's traces from request spans with gen_ai.agent.id.
 
-    from agw_runtime.app import create_app
-
-    app = create_app(AgentRunner(FakeModel(reply("ok"))), {"cve-triage": agent(name="cve-triage")})
-    tracer = trace.get_tracer("test-server")
-
-    async def instrumented(scope, receive, send):  # stands in for the ASGI instrumentation
-        if scope["type"] != "http":
-            return await app(scope, receive, send)
-        with tracer.start_as_current_span("POST /agents/{agent}/runs", kind=trace.SpanKind.SERVER):
-            await app(scope, receive, send)
-
-    res = TestClient(instrumented).post(
-        "/agents/cve-triage/runs", json={"input": "hi"}, headers={**HEADERS, "x-agw-session": "conv-7"}
+    FastAPI traces each request itself; that span is App Insights' request row.
+    """
+    res = _app(FakeModel(reply("ok"))).post(
+        "/agents/cve-triage/runs",
+        json={"input": "hi"},
+        headers={**HEADERS, "x-agw-session": "conv-7"},
     )
     assert res.status_code == 200
-    server = [s for s in spans.get_finished_spans() if s.kind == trace.SpanKind.SERVER][-1]
-    assert server.attributes["gen_ai.agent.id"] == "cve-triage"
-    assert server.attributes["gen_ai.agent.name"] == "cve-triage"
-    assert server.attributes["gen_ai.conversation.id"] == "conv-7"
-    assert server.attributes["agw.run_id"] == "run-9"
+    request_span = next(
+        s for s in spans.get_finished_spans() if s.name == "POST /agents/{agent}/runs"
+    )
+    assert request_span.attributes["gen_ai.agent.id"] == "cve-triage"
+    assert request_span.attributes["gen_ai.agent.name"] == "cve-triage"
+    assert request_span.attributes["gen_ai.conversation.id"] == "conv-7"
+    assert request_span.attributes["agw.run_id"] == "run-9"

@@ -82,6 +82,10 @@ resource "azuread_service_principal" "gateway" {
   client_id = azuread_application_registration.gateway.client_id
   # Only assigned users and groups can get a token at all.
   app_role_assignment_required = true
+  # Tags it as an enterprise app, so the portal's default Enterprise applications view lists it.
+  feature_tags {
+    enterprise = true
+  }
 }
 
 # APIM and the runtime call each other as Gateway.Internal.
@@ -163,6 +167,9 @@ resource "azuread_application_redirect_uris" "chat_spa" {
 resource "azuread_service_principal" "chat" {
   count     = local.deploy_chat ? 1 : 0
   client_id = azuread_application_registration.chat[0].client_id
+  feature_tags {
+    enterprise = true
+  }
 }
 
 # Tenant-wide consent (OBO can't show a consent prompt).
@@ -251,6 +258,9 @@ resource "azuread_application_api_access" "teams_self" {
 resource "azuread_service_principal" "teams" {
   count     = local.deploy_teams ? 1 : 0
   client_id = azuread_application_registration.teams[0].client_id
+  feature_tags {
+    enterprise = true
+  }
 }
 
 resource "azuread_service_principal_delegated_permission_grant" "teams" {
@@ -315,6 +325,9 @@ resource "azuread_application_api_access" "copilot_studio_gateway" {
 resource "azuread_service_principal" "copilot_studio" {
   count     = var.enable_copilot_studio ? 1 : 0
   client_id = azuread_application_registration.copilot_studio[0].client_id
+  feature_tags {
+    enterprise = true
+  }
 }
 
 resource "azuread_service_principal_delegated_permission_grant" "copilot_studio" {

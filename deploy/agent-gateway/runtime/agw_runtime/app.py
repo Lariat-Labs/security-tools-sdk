@@ -102,6 +102,22 @@ def _runner_from_env() -> AgentRunner:
     return AgentRunner(GatewayModelClient(base_url, scope, credential_from_env(scope)))
 
 
+def _tag_request_span(request: Request, agent: str, ctx: UserContext) -> None:
+    """Put the agent's correlation attributes on this HTTP request's server span.
+
+    Foundry's trace view finds an agent's traces from request spans carrying
+    ``gen_ai.agent.id``/``gen_ai.agent.name``, then joins the spans inside them. The
+    agent spans already carry these; without them on the request span too, Foundry's
+    Traces tab for the external agent stays empty.
+    """
+    span = getattr(request.state, "server_span", None)
+    if span is None or not span.is_recording():
+        return
+    for key, value in ctx.span_attributes(agent).items():
+        if value is not None:
+            span.set_attribute(key, value)
+
+
 def create_app(
     runner: AgentRunner | None = None, agents: dict[str, AgentDefinition] | None = None
 ) -> FastAPI:
@@ -118,6 +134,16 @@ def create_app(
         if "runner" not in state:  # built on first use so the module imports without Azure
             state["runner"] = _runner_from_env()
         return state["runner"]
+
+    @app.middleware("http")
+    async def _server_span(request: Request, call_next: Any) -> Any:
+        # Here the current span is the instrumentation's server span; inside the endpoint
+        # it is FastAPI's internal endpoint span, so keep a handle for _tag_request_span.
+        if telemetry.enabled():
+            from opentelemetry import trace
+
+            request.state.server_span = trace.get_current_span()
+        return await call_next(request)
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -145,6 +171,7 @@ def create_app(
             return _error(404, "unknown_agent", f"No agent named '{agent}'.")
         if agent not in ctx.allowed_agents:  # APIM checks this too
             return _error(403, "not_entitled", "You don't have access to this agent.")
+        _tag_request_span(request, agent, ctx)
         try:
             result = get_runner().run(
                 definition, ctx, body.input, [m.model_dump() for m in body.history]
@@ -200,6 +227,7 @@ def create_app(
         session = a2a.session_from_context(context_id)
         if session:
             ctx = dataclasses.replace(ctx, session=session)
+        _tag_request_span(request, agent, ctx)
 
         def run() -> Any:
             return get_runner().run(definition, ctx, text, history)
