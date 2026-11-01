@@ -17,6 +17,8 @@ Environment:
     AZURE_CLIENT_ID      client id of the runtime's user-assigned managed identity
     AGW_AGENTS_DIR       optional; defaults to the bundled agents/ directory
     AGW_PUBLIC_BASE_URL  the gateway's public URL, for A2A agent cards (https://<apim>.azure-api.net)
+    AGW_DEV_ACCESS_TOKEN local containers only: a short-lived model token instead of the
+                         managed identity (set by deploy/agent-gateway/run_local.py)
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from secsdk import telemetry
 
 from . import __version__, a2a
 from .agents import AgentDefinition, load_agents
+from .credentials import DEV_TOKEN_ENV, credential_from_env
 from .loop import AgentRunner, GatewayError, GatewayLimitError, GatewayModelClient, UserContext
 
 Text = Annotated[str, Field(min_length=1, max_length=20_000)]
@@ -96,7 +99,7 @@ def _runner_from_env() -> AgentRunner:
     scope = os.environ.get("AGW_GATEWAY_SCOPE")
     if not base_url or not scope:
         raise RuntimeError("AGW_MODEL_BASE_URL and AGW_GATEWAY_SCOPE must be set")
-    return AgentRunner(GatewayModelClient(base_url, scope))
+    return AgentRunner(GatewayModelClient(base_url, scope, credential_from_env(scope)))
 
 
 def create_app(
@@ -107,6 +110,9 @@ def create_app(
     state: dict[str, AgentRunner] = {}
     if runner is not None:
         state["runner"] = runner
+    elif os.environ.get(DEV_TOKEN_ENV):
+        # Local container: build now so a bad or expired token stops start-up.
+        state["runner"] = _runner_from_env()
 
     def get_runner() -> AgentRunner:
         if "runner" not in state:  # built on first use so the module imports without Azure

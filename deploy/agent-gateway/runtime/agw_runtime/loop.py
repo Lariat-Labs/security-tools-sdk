@@ -121,6 +121,7 @@ class GatewayModelClient:
 
     Authenticates with the runtime's managed identity (``AZURE_CLIENT_ID``) for the
     gateway app's audience; APIM checks the token's app role before anything else.
+    A local container passes a dev token credential instead (see ``credentials``).
     """
 
     def __init__(
@@ -145,6 +146,7 @@ class GatewayModelClient:
         headers: dict[str, str],
     ) -> ModelReply:
         import openai
+        from azure.core.exceptions import ClientAuthenticationError
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -163,6 +165,10 @@ class GatewayModelClient:
             raise GatewayError(exc.status_code, "model_error", str(exc)) from exc
         except openai.APIConnectionError as exc:
             raise GatewayError(502, "gateway_unreachable", str(exc)) from exc
+        except ClientAuthenticationError as exc:
+            # The runtime couldn't get its own token (identity or dev token), so no request
+            # was sent. A server-side failure, not the caller's: 502.
+            raise GatewayError(502, "model_auth_failed", exc.message[:500]) from exc
         completion = raw.parse()
         reply = completion.choices[0].message
         # Only the fields the API accepts back in the history.

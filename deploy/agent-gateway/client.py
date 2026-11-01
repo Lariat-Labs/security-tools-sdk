@@ -10,14 +10,21 @@
 Uses your Azure CLI sign-in to get a token for ``api://<app-id>/.default``, which carries ``Agents.Invoke``
 (the deployment pre-authorises the Azure CLI for that scope). Your tier, team and agent
 access come from your Entra groups; the gateway enforces your token limits.
+
+``--local`` calls a runtime container started by ``run_local.py`` instead, with no token: it
+sends the ``x-agw-*`` user headers that APIM would set, allowing every agent (no ``me``).
+
+    python deploy/agent-gateway/client.py --local run cve-triage "Prioritise CVE-2024-3400"
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
+import uuid
 
 import httpx
 from azure.identity import AzureCliCredential
@@ -29,6 +36,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--gateway", default=os.environ.get("AGW_GATEWAY_URL"))
     ap.add_argument("--app-id", default=os.environ.get("AGW_GATEWAY_APP_ID"))
+    ap.add_argument(
+        "--local", action="store_true", help="call a local runtime container (run_local.py)"
+    )
+    ap.add_argument(
+        "--local-url",
+        default=os.environ.get("AGW_LOCAL_URL", "http://127.0.0.1:8000"),
+        help="the local runtime's URL (default: AGW_LOCAL_URL or http://127.0.0.1:8000)",
+    )
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="agents you may use")
     sub.add_parser("me", help="your gateway profile: tier, team, cost center, limits")
@@ -38,16 +53,21 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--json", action="store_true", help="print the full response")
     run.add_argument("--session", help="conversation id (letters, digits, dashes) for telemetry")
     args = ap.parse_args(argv)
-    if not args.gateway or not args.app_id:
-        ap.error("set AGW_GATEWAY_URL and AGW_GATEWAY_APP_ID (or pass --gateway/--app-id)")
-
-    # The Azure CLI credential only takes "/.default"; the token still carries Agents.Invoke
-    # because the deployment pre-authorises the Azure CLI for that scope.
-    token = AzureCliCredential().get_token(f"api://{args.app_id}/.default").token
-    headers = {"Authorization": f"Bearer {token}"}
+    if args.local:
+        if args.command == "me":
+            ap.error("`me` comes from APIM; a local runtime has no gateway profile")
+        headers = local_headers(args.local_url)
+        base = args.local_url.rstrip("/") + "/agents"
+    else:
+        if not args.gateway or not args.app_id:
+            ap.error("set AGW_GATEWAY_URL and AGW_GATEWAY_APP_ID (or pass --gateway/--app-id)")
+        # The Azure CLI credential only takes "/.default"; the token still carries Agents.Invoke
+        # because the deployment pre-authorises the Azure CLI for that scope.
+        token = AzureCliCredential().get_token(f"api://{args.app_id}/.default").token
+        headers = {"Authorization": f"Bearer {token}"}
+        base = args.gateway.rstrip("/") + "/agents"
     if getattr(args, "session", None):
         headers["x-agw-session"] = args.session
-    base = args.gateway.rstrip("/") + "/agents"
     with httpx.Client(headers=headers, timeout=300) as http:
         if args.command == "list":
             res = http.get(base + "/")
@@ -75,13 +95,30 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(body["output"])
         usage, limits = body["usage"], body.get("limits", {})
+        remaining = ", ".join(f"{k} {v:,}" for k, v in limits.items()) or "no gateway limits"
         print(
             f"\n[{body['stop_reason']}] {usage['total_tokens']} tokens in {usage['model_calls']} "
-            f"model calls, {len(body['tool_calls'])} tool calls. Remaining: "
-            + ", ".join(f"{k} {v:,}" for k, v in limits.items()),
+            f"model calls, {len(body['tool_calls'])} tool calls. Remaining: {remaining}",
             file=sys.stderr,
         )
     return 0
+
+
+def local_headers(url: str) -> dict[str, str]:
+    """The user context APIM would set, for a local runtime: every agent allowed."""
+    try:
+        health = httpx.get(url.rstrip("/") + "/healthz", timeout=10).json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SystemExit(f"No runtime at {url} ({exc}). Start it with run_local.py.") from exc
+    return {
+        "x-agw-user": f"local:{getpass.getuser()}",
+        "x-agw-user-name": getpass.getuser(),
+        "x-agw-tier": "local",
+        "x-agw-team": "local",
+        "x-agw-allowed-agents": ",".join(health.get("agents", [])),
+        "x-agw-run": str(uuid.uuid4()),
+        "x-agw-client": "local",
+    }
 
 
 if __name__ == "__main__":

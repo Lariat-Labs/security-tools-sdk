@@ -730,6 +730,42 @@ plus the role assignments.
 `terraform destroy` removes all of it and purges the soft-deleted APIM and AI Services
 account, so the same names can be deployed again straight away.
 
+### Run the runtime container locally
+
+To test the runtime image on a laptop against your Foundry deployment, without APIM or
+Container Apps, use [`run_local.py`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/run_local.py):
+
+```bash
+az login                                   # needs Foundry User (or Cognitive Services OpenAI User) on the account
+export APPLICATIONINSIGHTS_CONNECTION_STRING=$(az monitor app-insights component show \
+  -a <app-insights-name> -g <resource-group> --query connectionString -o tsv)   # optional: telemetry
+uv run python deploy/agent-gateway/run_local.py --build   # Foundry endpoint: Terraform output, or --endpoint / AGW_FOUNDRY_ENDPOINT
+
+uv run python deploy/agent-gateway/client.py --local list
+uv run python deploy/agent-gateway/client.py --local run cve-triage "Prioritise CVE-2024-3400"
+```
+
+How it signs in: `run_local.py` gets a short-lived access token from your Azure CLI sign-in,
+for `https://cognitiveservices.azure.com` only, and passes it to the container as
+`AGW_DEV_ACCESS_TOKEN`. The runtime uses it in place of the managed identity. The container
+gets no refresh token, no `~/.azure` mount and no Azure CLI, and it's the same image
+that ships to Azure. The token lasts about an hour; when it expires, runs fail with
+`model_auth_failed` and you re-run `run_local.py`. The runtime refuses to start with a dev
+token in Container Apps, or with one that's expired or for a different audience.
+
+What's different from Azure:
+
+- Model calls go straight to Foundry, not through APIM: no per-user, team or run limits
+  (`limits` is empty), and Foundry logs the calls under your identity.
+- No front door: `client.py --local` sends the `x-agw-*` user headers that APIM would set,
+  allowing every agent. That's why the port is bound to `127.0.0.1` only. `me` isn't
+  available; it comes from APIM.
+- The `x-agw-*` context headers on model calls reach Foundry, which ignores them; in Azure,
+  APIM removes them first.
+- Telemetry goes to App Insights as `agent-gateway-runtime-local` (cloud role name), with
+  the same spans and `gen_ai.agent.id` as in Azure; that attribute is what Foundry's trace
+  view matches on.
+
 ## Decisions and alternatives
 
 | Decision | Chosen | Alternatives considered |
