@@ -39,6 +39,8 @@ examples = [
 gateway = [
     "azure-ai-projects>=2.3.0",
     "azure-identity>=1.26.0",
+    # App Insights export for run_webui.py's adapter (the containers get it from secsdk[azure-monitor]).
+    "azure-monitor-opentelemetry>=1.6",
     "fastapi>=0.162.0",
     "microsoft-agents-activity==1.8.0",
     "microsoft-agents-authentication-msal==1.8.0",

@@ -333,6 +333,30 @@ sequenceDiagram
 - **App package.** `teams/package.py` builds the manifest (with `webApplicationInfo` for SSO)
   and icons into a zip to upload in Teams or the Teams admin center.
 
+### Test from the Azure portal
+
+The agents API can be called from its **Test** tab in the Azure portal with your own token.
+The Test tab doesn't sign you in itself: an OAuth 2.0 authorization server in APIM only adds
+a sign-in button to the developer portal, which Standard v2 doesn't have unless you enable it.
+So paste the token as a header:
+
+1. Copy a token for the gateway (it lasts about an hour):
+
+    ```bash
+    APP_ID=$(terraform -chdir=deploy/agent-gateway/terraform output -raw gateway_app_id)
+    echo "Bearer $(az account get-access-token --scope api://$APP_ID/Agents.Invoke --query accessToken -o tsv)" | pbcopy
+    ```
+
+2. In the Azure portal: **APIM → APIs → Agent gateway: agents → an operation → Test**.
+   Select **+ Add header**, name it `Authorization` and paste the value.
+3. Send **GET /me** first: it returns your tier, team, cost center, agents and limits.
+   **POST /{agent}/runs** with `{"input": "..."}` runs an agent.
+
+The agents policy validates the token like any other, so you need the usual tier and agent
+groups, and your limits apply. The Trace pane stays empty for this API (the response has no
+`Apim-Trace-Id`); use App Insights or the run explorer workbook instead. The models API can't be
+tested this way: it accepts only the APIM and runtime managed identities.
+
 ### Copilot Studio (A2A)
 
 [Copilot Studio](https://learn.microsoft.com/microsoft-copilot-studio/add-agent-agent-to-agent)
@@ -408,6 +432,45 @@ just derived from the token (the runtime isn't called): user, tier and its token
 team, cost center, team pool and allowed agents. Tier, team and cost center are not in
 the token: they come from your groups and `gateway.yaml`. The web chat shows it in its
 side panel and Teams answers `me` with it.
+
+### MCP tools (proof of concept)
+
+With `enable_mcp_tools = true`, Terraform ([`mcp.tf`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/terraform/mcp.tf))
+exposes one secsdk operation, `kev.lookup`, as an MCP tool in APIM. Any MCP client (VS Code,
+Claude, Copilot Studio, a local agent) can call the SDK directly, with the gateway's sign-in.
+The gateway agents don't use it: their tools still run inside the runtime.
+
+```mermaid
+flowchart LR
+    C[MCP client] -- "Entra token (Agents.Invoke)" --> M["APIM MCP server agw-mcp<br/>/secsdk-mcp/mcp · tool kev_lookup"]
+    M --> T["APIM REST API agw-tools<br/>GET /tools/kev-lookup?cve_id="]
+    T -- "APIM managed identity" --> R["runtime<br/>GET /tools/kev-lookup"]
+    R --> S[secsdk kev.lookup]
+```
+
+- **Mode:** APIM's *REST API as MCP server*. The tool's name, description and input schema
+  come from the `agw-tools` operation. It's a GET with a query parameter, which avoids the
+  reported issue with JSON bodies arriving as strings.
+- **Who:** the same token as the agents API (`scp` must contain `Agents.Invoke`), so only users
+  assigned to the gateway app. The MCP server rate limits each user (`oid`) to
+  `mcp_calls_per_minute` (default 30). The REST API checks the token too, so `/tools` can't be
+  called without one.
+- **Runtime:** `GET /tools/kev-lookup` returns the secsdk envelope (`ok`, `data` or `error`).
+  It requires the `x-agw-user` header, which APIM sets from the token, and like the rest of the
+  runtime it accepts only APIM's managed identity.
+- **Telemetry:** APIM writes an App Insights request per MCP call with `gen_ai.tool.name`. The
+  runtime's request span carries `enduser.id` and `secsdk.operation`.
+
+Try it once deployed (initialize, list the tools, call `kev_lookup`, with your Azure CLI sign-in):
+
+```bash
+uv run python deploy/agent-gateway/mcp_call.py --cve CVE-2024-3400     # or: make mcp-call
+```
+
+In VS Code, add it with **MCP: Add Server → HTTP**, using the URL and an
+`Authorization: Bearer <token>` header. The token lasts about an hour. Not covered yet: the MCP
+authorization spec's discovery flow (protected resource metadata), so clients must be given a
+token rather than signing in themselves.
 
 ## Limits
 
@@ -573,9 +636,15 @@ external, and what Foundry does and doesn't show about them: see
   (`gen_ai.conversation.id`, `session.id`) and every usage event (`sessionId`).
 - **Content capture** (`AGW_CAPTURE_CONTENT=true`, on by default): the runtime records the
   user's input and each tool call's arguments as **span events**. Azure Monitor stores span
-  events in `AppTraces`, which the deployment sets to **30 days**; spans stay at 90. Model answers and
-  tool results are never recorded. Arguments listed in `AGW_REDACT_ARGS` (default
+  events in `AppTraces`, which the deployment sets to **30 days**; spans stay at 90. Tool results are
+  never recorded, and model answers only with conversation capture (next). Arguments listed in `AGW_REDACT_ARGS` (default
   `azure.query.query`, the Resource Graph KQL) are replaced with `[redacted]`.
+- **Conversation capture** (`capture_conversation` in Terraform, `AGW_CAPTURE_CONVERSATION=true`,
+  off by default): each run's user input and final agent reply go on its `invoke_agent` span as
+  `gen_ai.input.messages` and `gen_ai.output.messages` (OpenTelemetry GenAI format, up to 4,000
+  characters each). That fills the conversation view of a trace in Foundry, which otherwise says
+  *No conversation turns found*. These are span attributes, so model answers are kept as long as
+  spans (90 days), not 30. Turn it on only where storing answers is acceptable.
 - **Names.** The front door passes the user's display name and sign-in name from the token;
   runs record them (`agw.user.name`, `agw.user.upn`) so dashboards show people, not object ids.
 - **Sampling.** `azure-monitor-opentelemetry` defaults to a rate-limited sampler (5 traces
@@ -673,6 +742,9 @@ Administrator in Entra.
 # 1. Groups for tiers, teams and agents; put their object ids in your gateway.yaml
 az ad group create --display-name sg-agents-standard --mail-nickname sg-agents-standard \
   --query id -o tsv                               # repeat for each tier, team and agent
+#    or let Terraform create them: set gateway_groups in terraform.tfvars, then
+#    terraform -chdir=deploy/agent-gateway/terraform apply -target=azuread_group.gateway
+#    terraform -chdir=deploy/agent-gateway/terraform output gateway_group_ids
 
 # 2. Policies from your config, into a git-ignored folder
 cd deploy/agent-gateway
@@ -729,6 +801,121 @@ plus the role assignments.
 
 `terraform destroy` removes all of it and purges the soft-deleted APIM and AI Services
 account, so the same names can be deployed again straight away.
+
+### Linking APIM as Foundry's AI Gateway
+
+The instance qualifies as a Foundry AI Gateway (Foundry → **Manage → AI Gateway → Add AI
+Gateway → Use existing**; then **Add project to gateway** for existing projects). Linking it:
+
+- **Switches APIM's managed identity to system-assigned only, detaching `id-agw-apim`.**
+  Our policies call the runtime and Foundry with that identity, so every gateway call returns
+  500 until it's back. Terraform declares both identities (`SystemAssigned, UserAssigned`), so
+  a `terraform apply` after linking restores ours and keeps Foundry's, which Foundry grants
+  Cognitive Services User on the AI Services account.
+- **Adds its own API, backend, product and subscription**, named after the AI Services account.
+  It leaves our APIs, policies, named values and the service policy alone. Terraform doesn't
+  manage those objects and doesn't touch them.
+- **Resets the token-limit counters.** They started from zero after the identity fix in our test, so
+  expect users' minute, day and month counts to reset when the instance is updated this way.
+
+Our runtime keeps using our models API; Foundry's gateway API is for traffic through the
+Foundry project (its per-project limits) and for custom agent registration.
+
+### Run the runtime container locally
+
+To test the runtime image on a laptop against your Foundry deployment, without APIM or
+Container Apps, use [`run_local.py`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/run_local.py):
+
+```bash
+az login                                   # needs Foundry User (or Cognitive Services OpenAI User) on the account
+export APPLICATIONINSIGHTS_CONNECTION_STRING=$(az monitor app-insights component show \
+  -a <app-insights-name> -g <resource-group> --query connectionString -o tsv)   # optional: telemetry
+uv run python deploy/agent-gateway/run_local.py --build   # Foundry endpoint: Terraform output, or --endpoint / AGW_FOUNDRY_ENDPOINT
+
+uv run python deploy/agent-gateway/client.py --local list
+uv run python deploy/agent-gateway/client.py --local run cve-triage "Prioritise CVE-2024-3400"
+```
+
+How it signs in: `run_local.py` gets a short-lived access token from your Azure CLI sign-in,
+for `https://cognitiveservices.azure.com` only, and passes it to the container as
+`AGW_DEV_ACCESS_TOKEN`. The runtime uses it in place of the managed identity. The container
+gets no refresh token, no `~/.azure` mount and no Azure CLI, and it's the same image
+that ships to Azure. The token lasts about an hour; when it expires, runs fail with
+`model_auth_failed` and you re-run `run_local.py`. The runtime refuses to start with a dev
+token in Container Apps, or with one that's expired or for a different audience.
+
+What's different from Azure:
+
+- Model calls go straight to Foundry, not through APIM: no per-user, team or run limits
+  (`limits` is empty), and Foundry logs the calls under your identity.
+- No front door: `client.py --local` sends the `x-agw-*` user headers that APIM would set,
+  allowing every agent. That's why the port is bound to `127.0.0.1` only. `me` isn't
+  available; it comes from APIM.
+- The `x-agw-*` context headers on model calls reach Foundry, which ignores them; in Azure,
+  APIM removes them first.
+- Telemetry goes to App Insights as `agent-gateway-runtime-local` (cloud role name), with
+  the same spans and `gen_ai.agent.id` as in Azure; that attribute is what Foundry's trace
+  view matches on.
+
+### Chat in Open WebUI locally
+
+[`run_webui.py`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/run_webui.py)
+starts [Open WebUI](https://openwebui.com) in Docker with a small OpenAI-compatible adapter
+([`webui/`](https://github.com/Lariat-Labs/security-tools-sdk/tree/main/deploy/agent-gateway/webui))
+in front of the agents API. Each agent is a model in the picker; each chat turn is one run.
+
+```bash
+az login
+uv run python deploy/agent-gateway/run_webui.py            # deployed gateway, as you
+uv run python deploy/agent-gateway/run_webui.py --local    # runtime from run_local.py
+# open http://127.0.0.1:3000; Ctrl-C stops both (chats stay in the agw-webui-data volume)
+```
+
+By default the adapter calls the deployed agents API with your Azure CLI token, the same
+way `client.py` does. APIM applies your tier's limits, and the run produces the same token
+metrics, usage events and traces as a Teams or Copilot Studio run. Open WebUI's chat id
+becomes the gateway session, so one conversation's runs group together in the run explorer.
+The gateway URL and app id come from `AGW_GATEWAY_URL` / `AGW_GATEWAY_APP_ID`, else from
+Terraform outputs.
+
+Each reply's thinking panel shows the tools called (with outcome and time), the tokens
+used and the tokens you have left (this minute, today, this month, your team's pool),
+read from the gateway's `x-agw-*-remaining` headers. A limit hit comes back as a chat
+reply (`⏳ … Try again in 20 seconds.`) rather than an error.
+
+Things to know:
+
+- Open WebUI runs without sign-in and everyone who opens it acts as you, so it binds to
+  `127.0.0.1` only. The adapter also binds to `127.0.0.1` and only accepts a per-start key
+  that it hands to Open WebUI.
+- Open WebUI's background model calls (titles, tags, follow-ups, autocomplete) are turned
+  off: each one would run an agent and spend your tokens.
+- History is resent each turn (the runtime keeps no state), so long chats cost more tokens
+  per turn. The adapter sends the last 40 turns.
+- With `--local` there are no gateway limits, as with `client.py --local`.
+- Set `APPLICATIONINSIGHTS_CONNECTION_STRING` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to trace
+  the adapter as `agent-gateway-webui-local`. It passes `traceparent` on, so each chat turn
+  is one trace with APIM and the runtime.
+
+**Tracing without APIM.** With `--local`, set the connection string for both processes. Each
+turn is then one trace from the adapter through the local runtime
+(`agent-gateway-runtime-local`) to Foundry, with the same `gen_ai.agent.id` attributes as in
+Azure, so the runs also show in Foundry's Traces tab for the agent:
+
+```bash
+make runtime-build        # terminal 1 (or: make runtime)
+make webui-local          # terminal 2
+```
+
+`make runtime` and `make runtime-build` take the connection string from Terraform's
+`application_insights_connection_string` output, unless `APPLICATIONINSIGHTS_CONNECTION_STRING`
+is already set. Add `CONVERSATION=1` (`run_local.py --conversation`) for the conversation view.
+
+`--conversation` records each run's input and final reply on its `invoke_agent` span
+(`gen_ai.input.messages` / `gen_ai.output.messages`, as `AGW_CAPTURE_CONVERSATION=true` does
+in Azure), which Foundry's conversation view reads. Without it the view says *No conversation
+turns found*. `run_local.py` also passes `AGW_CAPTURE_CONTENT` and `AGW_REDACT_ARGS` through
+when they're set.
 
 ## Decisions and alternatives
 

@@ -155,3 +155,29 @@ def test_cli_writes_spans_to_file_and_joins_parent_trace(tmp_path):
     op = next(s for s in spans if s["name"] == "secsdk azure.presets")
     assert op["context"]["trace_id"] == "0x0af7651916cd43dd8448eb211c80319c"
     assert op["resource"]["attributes"]["service.name"] == "secctl"
+
+
+@pytest.mark.parametrize(
+    ("sampler_env", "expected"),
+    [(None, {"sampling_ratio": 1.0}), ("microsoft.rate_limited", {})],
+)
+def test_azure_monitor_keeps_every_span_unless_a_sampler_is_chosen(
+    monkeypatch, sampler_env, expected
+):
+    import types
+
+    calls = []
+    fake = types.ModuleType("azure.monitor.opentelemetry")
+    fake.configure_azure_monitor = lambda **kwargs: calls.append(kwargs)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "azure.monitor.opentelemetry", fake)
+    monkeypatch.setattr(telemetry, "_configured", False)
+    monkeypatch.setattr(telemetry.atexit, "register", lambda fn: None)
+    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=x")
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "test")
+    if sampler_env:
+        monkeypatch.setenv("OTEL_TRACES_SAMPLER", sampler_env)
+    else:
+        monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+
+    assert telemetry.configure() == "azure-monitor"
+    assert calls == [expected]

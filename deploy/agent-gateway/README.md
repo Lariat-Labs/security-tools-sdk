@@ -16,7 +16,10 @@ steps are in [docs/agent-gateway.md](../../docs/agent-gateway.md).
 | `teams/` | Teams bot (Microsoft 365 Agents SDK): SSO + OBO, no secrets; `package.py` builds the Teams app zip |
 | `runtime/agw_runtime/a2a.py` | Agent2Agent (A2A) endpoint and agent card, for Copilot Studio |
 | `register_agents.py` | Registers the agents as Foundry external agents (trace view) |
-| `client.py` | Call the gateway as yourself (`az login`) |
+| `client.py` | Call the gateway as yourself (`az login`); `--local` calls a local runtime container |
+| `run_local.py` | Run the runtime container on your machine against Foundry, with a short-lived token ([how](../../docs/agent-gateway.md#run-the-runtime-container-locally)) |
+| `run_webui.py`, `webui/` | Chat with the agents in Open WebUI on your machine, through the deployed gateway (your real limits) or a local runtime ([how](../../docs/agent-gateway.md#chat-in-open-webui-locally)) |
+| `terraform/mcp.tf`, `mcp_call.py` | Proof of concept: secsdk's `kev.lookup` as an MCP tool behind APIM (`enable_mcp_tools`), and a client to call it ([how](../../docs/agent-gateway.md#mcp-tools-proof-of-concept)) |
 | `tests/` | Offline tests: `uv run pytest deploy/agent-gateway` |
 
 Status: proposal, validated end to end in a pilot deployment (see *Pilot results* in the doc).

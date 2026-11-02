@@ -6,7 +6,11 @@ tool call's arguments as **span events**. Azure Monitor stores span events in th
 ``AppTraces`` table, linked to their span, so content can have a shorter retention
 than the spans themselves (30 days vs 90 in the deployment).
 
-Model outputs and tool results are never recorded.
+Tool results are never recorded. Model output is recorded only with
+``AGW_CAPTURE_CONVERSATION=true``, a separate opt-in: each run's user input and final
+agent reply go on its ``invoke_agent`` span as ``gen_ai.input.messages`` and
+``gen_ai.output.messages`` (OpenTelemetry GenAI format), which Foundry's conversation view
+reads. Being span attributes, they are kept as long as the spans (90 days in the deployment).
 
 Arguments listed in ``AGW_REDACT_ARGS`` (``operation.parameter``, comma-separated) are
 replaced with ``"[redacted]"``. The default redacts Azure Resource Graph queries, which
@@ -25,6 +29,27 @@ DEFAULT_REDACT = "azure.query.query"
 
 def capture_enabled() -> bool:
     return os.environ.get("AGW_CAPTURE_CONTENT", "").lower() in ("1", "true", "yes", "on")
+
+
+def conversation_enabled() -> bool:
+    return os.environ.get("AGW_CAPTURE_CONVERSATION", "").lower() in ("1", "true", "yes", "on")
+
+
+def _messages(role: str, text: str, **extra: str) -> str:
+    message = {"role": role, "parts": [{"type": "text", "content": truncate(text)}], **extra}
+    return json.dumps([message], ensure_ascii=False, separators=(",", ":"))
+
+
+def input_messages(user_input: str) -> str:
+    """``gen_ai.input.messages`` for one run: the user's input (earlier turns are other runs)."""
+    return _messages("user", user_input)
+
+
+def output_messages(output: str, stop_reason: str) -> str:
+    """``gen_ai.output.messages`` for one run: the agent's final reply."""
+    return _messages(
+        "assistant", output, finish_reason="stop" if stop_reason == "completed" else "length"
+    )
 
 
 def _redactions() -> dict[str, set[str]]:

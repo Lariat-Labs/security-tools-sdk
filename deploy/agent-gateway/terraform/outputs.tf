@@ -73,3 +73,19 @@ output "github_variables" {
     AGW_APPS              = jsonencode(keys(local.container_apps))
   } : {}
 }
+
+output "gateway_group_ids" {
+  description = "Object IDs of the groups created from gateway_groups, to put in gateway.yaml."
+  value       = { for k, g in azuread_group.gateway : k => g.object_id }
+}
+
+output "mcp_endpoint" {
+  description = "MCP server URL (Streamable HTTP) when enable_mcp_tools is on; send an Entra token for the gateway as a bearer token."
+  value       = local.deploy_mcp ? "${azurerm_api_management.this.gateway_url}/${local.mcp_path}/mcp" : ""
+}
+
+output "application_insights_connection_string" {
+  description = "App Insights connection string, for local telemetry (make runtime / runtime-build pass it to run_local.py)."
+  value       = azurerm_application_insights.this.connection_string
+  sensitive   = true
+}

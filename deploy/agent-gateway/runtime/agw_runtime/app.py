@@ -8,6 +8,8 @@ APIM sets from the user's validated token, can be trusted here.
     POST /agents/{agent}/a2a     Agent2Agent JSON-RPC (message/send), for Copilot Studio
     GET  /agents/{agent}/a2a/.well-known/agent.json   A2A agent card (public)
     POST /agents/{agent}/runs    {"input": "...", "history": [{"role": "user", "content": "..."}]}
+    GET  /tools/kev-lookup       ?cve_id=CVE-...  one secsdk operation as a plain HTTP tool;
+                                 APIM exposes it as an MCP tool (terraform: enable_mcp_tools)
     GET  /healthz
 
 Environment:
@@ -17,6 +19,8 @@ Environment:
     AZURE_CLIENT_ID      client id of the runtime's user-assigned managed identity
     AGW_AGENTS_DIR       optional; defaults to the bundled agents/ directory
     AGW_PUBLIC_BASE_URL  the gateway's public URL, for A2A agent cards (https://<apim>.azure-api.net)
+    AGW_DEV_ACCESS_TOKEN local containers only: a short-lived model token instead of the
+                         managed identity (set by deploy/agent-gateway/run_local.py)
 """
 
 from __future__ import annotations
@@ -26,17 +30,19 @@ import os
 from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from secsdk import telemetry
+from secsdk import Client, CoreSettings, telemetry
 
 from . import __version__, a2a
 from .agents import AgentDefinition, load_agents
+from .credentials import DEV_TOKEN_ENV, credential_from_env
 from .loop import AgentRunner, GatewayError, GatewayLimitError, GatewayModelClient, UserContext
 
 Text = Annotated[str, Field(min_length=1, max_length=20_000)]
+CVE_ID = r"^CVE-\d{4}-\d{4,}$"
 
 
 class HistoryMessage(BaseModel):
@@ -96,22 +102,54 @@ def _runner_from_env() -> AgentRunner:
     scope = os.environ.get("AGW_GATEWAY_SCOPE")
     if not base_url or not scope:
         raise RuntimeError("AGW_MODEL_BASE_URL and AGW_GATEWAY_SCOPE must be set")
-    return AgentRunner(GatewayModelClient(base_url, scope))
+    return AgentRunner(GatewayModelClient(base_url, scope, credential_from_env(scope)))
+
+
+def _tag_request_span(request: Request, agent: str, ctx: UserContext) -> None:
+    """Put the agent's correlation attributes on this HTTP request's server span.
+
+    Foundry's trace view finds an agent's traces from request spans carrying
+    ``gen_ai.agent.id``/``gen_ai.agent.name``, then joins the spans inside them. The
+    agent spans already carry these; without them on the request span too, Foundry's
+    Traces tab for the external agent stays empty.
+    """
+    span = getattr(request.state, "server_span", None)
+    if span is None or not span.is_recording():
+        return
+    for key, value in ctx.span_attributes(agent).items():
+        if value is not None:
+            span.set_attribute(key, value)
 
 
 def create_app(
-    runner: AgentRunner | None = None, agents: dict[str, AgentDefinition] | None = None
+    runner: AgentRunner | None = None,
+    agents: dict[str, AgentDefinition] | None = None,
+    sdk: Client | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Agent gateway runtime", version=__version__)
     catalog = agents if agents is not None else load_agents()
     state: dict[str, AgentRunner] = {}
+    tools_sdk: dict[str, Client] = {"sdk": sdk} if sdk is not None else {}
     if runner is not None:
         state["runner"] = runner
+    elif os.environ.get(DEV_TOKEN_ENV):
+        # Local container: build now so a bad or expired token stops start-up.
+        state["runner"] = _runner_from_env()
 
     def get_runner() -> AgentRunner:
         if "runner" not in state:  # built on first use so the module imports without Azure
             state["runner"] = _runner_from_env()
         return state["runner"]
+
+    @app.middleware("http")
+    async def _server_span(request: Request, call_next: Any) -> Any:
+        # Here the current span is the instrumentation's server span; inside the endpoint
+        # it is FastAPI's internal endpoint span, so keep a handle for _tag_request_span.
+        if telemetry.enabled():
+            from opentelemetry import trace
+
+            request.state.server_span = trace.get_current_span()
+        return await call_next(request)
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -139,6 +177,7 @@ def create_app(
             return _error(404, "unknown_agent", f"No agent named '{agent}'.")
         if agent not in ctx.allowed_agents:  # APIM checks this too
             return _error(403, "not_entitled", "You don't have access to this agent.")
+        _tag_request_span(request, agent, ctx)
         try:
             result = get_runner().run(
                 definition, ctx, body.input, [m.model_dump() for m in body.history]
@@ -151,6 +190,31 @@ def create_app(
             status = exc.status if 400 <= exc.status < 500 else 502
             return _error(status, exc.code, exc.message)
         return result.to_dict()
+
+    # ----- tools as plain HTTP (APIM turns these operations into MCP tools) --------------------
+
+    @app.get("/tools/kev-lookup")
+    def kev_lookup_tool(
+        request: Request,
+        cve_id: Annotated[str, Query(pattern=CVE_ID, description="CVE id, e.g. CVE-2024-3400")],
+    ) -> Any:
+        """Look up a CVE in CISA's Known Exploited Vulnerabilities catalog (MCP tool via APIM)."""
+        user = request.headers.get("x-agw-user", "")
+        if not user:  # APIM sets it from the caller's validated token
+            return _error(401, "missing_context", "Call this service through the agent gateway.")
+        span = getattr(request.state, "server_span", None)
+        if span is not None and span.is_recording():
+            span.set_attribute("enduser.id", user)
+            span.set_attribute("gen_ai.operation.name", "execute_tool")
+            span.set_attribute("gen_ai.tool.name", "kev_lookup")
+            span.set_attribute("secsdk.operation", "kev.lookup")
+            client_app = request.headers.get("x-agw-client", "")
+            if client_app:
+                span.set_attribute("agw.client_app", client_app[:64])
+        if "sdk" not in tools_sdk:
+            tools_sdk["sdk"] = Client(CoreSettings())
+        # The secsdk envelope, ok or not: an agent reads "ok" and "error" like any tool result.
+        return tools_sdk["sdk"].execute("kev.lookup", {"cve_id": cve_id}).to_dict()
 
     # ----- Agent2Agent (Copilot Studio) --------------------------------------------------------
 
@@ -194,6 +258,7 @@ def create_app(
         session = a2a.session_from_context(context_id)
         if session:
             ctx = dataclasses.replace(ctx, session=session)
+        _tag_request_span(request, agent, ctx)
 
         def run() -> Any:
             return get_runner().run(definition, ctx, text, history)

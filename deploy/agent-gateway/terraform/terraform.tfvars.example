@@ -23,3 +23,16 @@ models_policy_file = "../build/policies/models-api.xml"
 
 # Others who use the Foundry portal (Monitor, Insights scans, evaluations); you are included.
 # foundry_users = ["<user-or-group-object-id>"]
+
+# Optional: let Terraform create the tier/team/agent groups (see groups.tf for the order:
+# create them first, put their ids in gateway.yaml, then render the policies).
+# gateway_groups = {
+#   standard   = { display_name = "sg-agw-standard" }
+#   secops     = { display_name = "sg-agw-team-secops" }
+#   cve-triage = { display_name = "sg-agw-agent-cve-triage", members = ["<user-object-id>"] }
+# }
+
+# Proof of concept: secsdk's kev.lookup as an MCP tool behind APIM (see mcp.tf). Needs a
+# runtime image with the /tools/kev-lookup endpoint. Endpoint: terraform output mcp_endpoint
+# enable_mcp_tools     = true
+# mcp_calls_per_minute = 30

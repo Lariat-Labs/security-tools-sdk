@@ -464,6 +464,47 @@ def test_content_capture_records_input_and_tool_arguments(spans, monkeypatch):
     assert args.attributes["agw.run_id"] == "run-s"
 
 
+def test_conversation_capture_records_input_and_reply_for_foundry(spans, monkeypatch):
+    monkeypatch.delenv("AGW_CAPTURE_CONTENT", raising=False)
+    monkeypatch.setenv("AGW_CAPTURE_CONVERSATION", "true")
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s", session="conv-3")
+    _run_with_tool(ctx)
+    ours = _ours(spans)
+    run = next(s for s in ours if s.name.startswith("invoke_agent"))
+    assert json.loads(run.attributes["gen_ai.input.messages"]) == [
+        {"role": "user", "parts": [{"type": "text", "content": "Is CVE-2023-4966 exploited?"}]}
+    ]
+    assert json.loads(run.attributes["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": "done"}],
+            "finish_reason": "stop",
+        }
+    ]
+    assert not run.events  # independent of AGW_CAPTURE_CONTENT
+    # Only the run span carries the conversation; tool results are never recorded.
+    others = [s for s in ours if s is not run]
+    assert others and not any("gen_ai.output.messages" in s.attributes for s in others)
+
+
+def test_conversation_is_off_by_default(spans, monkeypatch):
+    monkeypatch.delenv("AGW_CAPTURE_CONVERSATION", raising=False)
+    ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s", session="conv-4")
+    _run_with_tool(ctx)
+    for s in _ours(spans):
+        assert "gen_ai.input.messages" not in s.attributes
+        assert "gen_ai.output.messages" not in s.attributes
+
+
+def test_conversation_messages_are_truncated_and_mark_unfinished_runs():
+    from agw_runtime import content
+
+    long = json.loads(content.input_messages("x" * 10_000))[0]["parts"][0]["content"]
+    assert len(long) == content.MAX_CHARS and long.endswith("…")
+    out = json.loads(content.output_messages("partial", "budget_exhausted"))[0]
+    assert out["finish_reason"] == "length"
+
+
 def test_sensitive_tool_arguments_are_redacted(spans, monkeypatch):
     monkeypatch.setenv("AGW_CAPTURE_CONTENT", "true")
     ctx = UserContext(user="u1", tier="standard", team="secops", run_id="run-s")
@@ -577,3 +618,68 @@ def test_agent_config_attributes_stay_under_the_property_limit():
     tools = [{"function": {"name": f"tool_{i}", "description": "d" * 400}} for i in range(100)]
     attrs = agent_config_attributes("x" * 20000, tools)
     assert all(len(v) <= MAX_ATTRIBUTE_CHARS for v in attrs.values())
+
+
+def test_request_span_carries_agent_ids_for_foundry(spans):
+    """Foundry finds an external agent's traces from request spans with gen_ai.agent.id.
+
+    FastAPI traces each request itself; that span is App Insights' request row.
+    """
+    res = _app(FakeModel(reply("ok"))).post(
+        "/agents/cve-triage/runs",
+        json={"input": "hi"},
+        headers={**HEADERS, "x-agw-session": "conv-7"},
+    )
+    assert res.status_code == 200
+    request_span = next(
+        s for s in spans.get_finished_spans() if s.name == "POST /agents/{agent}/runs"
+    )
+    assert request_span.attributes["gen_ai.agent.id"] == "cve-triage"
+    assert request_span.attributes["gen_ai.agent.name"] == "cve-triage"
+    assert request_span.attributes["gen_ai.conversation.id"] == "conv-7"
+    assert request_span.attributes["agw.run_id"] == "run-9"
+
+
+# ----- tools as plain HTTP (the MCP tool behind APIM) -------------------------------------------
+
+
+class FakeSdk:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, operation, params):
+        self.calls.append((operation, params))
+        if params["cve_id"] == "CVE-1999-0001":
+            return Result(
+                ok=False, operation=operation, error={"code": "not_found", "message": "Not in KEV"}
+            )
+        return Result(ok=True, operation=operation, data={"cve_id": params["cve_id"]})
+
+
+def _tools_app():
+    from fastapi.testclient import TestClient
+
+    from agw_runtime.app import create_app
+
+    sdk = FakeSdk()
+    return TestClient(create_app(AgentRunner(FakeModel()), {}, sdk=sdk)), sdk
+
+
+def test_kev_lookup_tool_returns_the_secsdk_envelope():
+    client, sdk = _tools_app()
+    res = client.get("/tools/kev-lookup", params={"cve_id": "CVE-2024-3400"}, headers=HEADERS)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True and body["operation"] == "kev.lookup"
+    assert body["data"] == {"cve_id": "CVE-2024-3400"}
+    assert sdk.calls == [("kev.lookup", {"cve_id": "CVE-2024-3400"})]
+    missing = client.get("/tools/kev-lookup", params={"cve_id": "CVE-1999-0001"}, headers=HEADERS)
+    assert missing.status_code == 200 and missing.json()["error"]["code"] == "not_found"
+
+
+def test_kev_lookup_tool_needs_gateway_context_and_a_cve_id():
+    client, sdk = _tools_app()
+    assert client.get("/tools/kev-lookup", params={"cve_id": "CVE-2024-3400"}).status_code == 401
+    bad = client.get("/tools/kev-lookup", params={"cve_id": "not-a-cve"}, headers=HEADERS)
+    assert bad.status_code == 422
+    assert sdk.calls == []
