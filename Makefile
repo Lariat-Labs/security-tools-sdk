@@ -8,12 +8,14 @@ AGW  := deploy/agent-gateway
 # Gateway URL and app id from Terraform outputs, unless already set in the environment.
 GW_ENV := AGW_GATEWAY_URL=$${AGW_GATEWAY_URL:-$$($(TF) output -raw gateway_url)} \
           AGW_GATEWAY_APP_ID=$${AGW_GATEWAY_APP_ID:-$$($(TF) output -raw gateway_app_id)}
+# App Insights for local telemetry: yours if exported, else the Terraform output (empty = off).
+AI_ENV := APPLICATIONINSIGHTS_CONNECTION_STRING="$${APPLICATIONINSIGHTS_CONNECTION_STRING:-$$($(TF) output -raw application_insights_connection_string 2>/dev/null)}"
 AGENT ?= cve-triage
 Q     ?= Prioritise CVE-2024-3400 and CVE-2023-4966
 
 .DEFAULT_GOAL := help
 .PHONY: help sync test lint fmt typecheck docs check \
-        webui webui-local runtime runtime-build gw-me gw-list gw-run local-run \
+        webui webui-local runtime runtime-build gw-me gw-list gw-run mcp-call local-run \
         tf-init tf-plan tf-apply apim-down apim-up down
 
 help: ## List the commands
@@ -48,11 +50,11 @@ webui: ## Open WebUI on :3000 through the deployed gateway, as you (az login)
 webui-local: ## Open WebUI on :3000 through the local runtime (start `make runtime` first)
 	uv run python $(AGW)/run_webui.py --local
 
-runtime: ## Run the runtime container on :8000 against Foundry
-	uv run python $(AGW)/run_local.py
+runtime: ## Run the runtime on :8000, traced to App Insights (CONVERSATION=1 for the conversation view)
+	$(AI_ENV) uv run python $(AGW)/run_local.py $(if $(CONVERSATION),--conversation)
 
-runtime-build: ## Rebuild the runtime image, then run it
-	uv run python $(AGW)/run_local.py --build
+runtime-build: ## Rebuild the runtime image, then run it (traced to App Insights)
+	$(AI_ENV) uv run python $(AGW)/run_local.py --build $(if $(CONVERSATION),--conversation)
 
 gw-me: ## Your gateway profile: tier, team, limits
 	$(GW_ENV) uv run python $(AGW)/client.py me
@@ -62,6 +64,9 @@ gw-list: ## Agents you may use through the gateway
 
 gw-run: ## Run an agent through the gateway: make gw-run AGENT=cve-triage Q="..."
 	$(GW_ENV) uv run python $(AGW)/client.py run $(AGENT) "$(Q)"
+
+mcp-call: ## Call the MCP tool kev_lookup through APIM: make mcp-call CVE=CVE-2024-3400
+	uv run python $(AGW)/mcp_call.py --cve $(or $(CVE),CVE-2024-3400)
 
 local-run: ## Run an agent on the local runtime: make local-run AGENT=... Q="..."
 	uv run python $(AGW)/client.py --local run $(AGENT) "$(Q)"

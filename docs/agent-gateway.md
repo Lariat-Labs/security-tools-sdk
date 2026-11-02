@@ -433,6 +433,45 @@ team, cost center, team pool and allowed agents. Tier, team and cost center are 
 the token: they come from your groups and `gateway.yaml`. The web chat shows it in its
 side panel and Teams answers `me` with it.
 
+### MCP tools (proof of concept)
+
+With `enable_mcp_tools = true`, Terraform ([`mcp.tf`](https://github.com/Lariat-Labs/security-tools-sdk/blob/main/deploy/agent-gateway/terraform/mcp.tf))
+exposes one secsdk operation, `kev.lookup`, as an MCP tool in APIM. Any MCP client (VS Code,
+Claude, Copilot Studio, a local agent) can call the SDK directly, with the gateway's sign-in.
+The gateway agents don't use it: their tools still run inside the runtime.
+
+```mermaid
+flowchart LR
+    C[MCP client] -- "Entra token (Agents.Invoke)" --> M["APIM MCP server agw-mcp<br/>/secsdk-mcp/mcp · tool kev_lookup"]
+    M --> T["APIM REST API agw-tools<br/>GET /tools/kev-lookup?cve_id="]
+    T -- "APIM managed identity" --> R["runtime<br/>GET /tools/kev-lookup"]
+    R --> S[secsdk kev.lookup]
+```
+
+- **Mode:** APIM's *REST API as MCP server*. The tool's name, description and input schema
+  come from the `agw-tools` operation. It's a GET with a query parameter, which avoids the
+  reported issue with JSON bodies arriving as strings.
+- **Who:** the same token as the agents API (`scp` must contain `Agents.Invoke`), so only users
+  assigned to the gateway app. The MCP server rate limits each user (`oid`) to
+  `mcp_calls_per_minute` (default 30). The REST API checks the token too, so `/tools` can't be
+  called without one.
+- **Runtime:** `GET /tools/kev-lookup` returns the secsdk envelope (`ok`, `data` or `error`).
+  It requires the `x-agw-user` header, which APIM sets from the token, and like the rest of the
+  runtime it accepts only APIM's managed identity.
+- **Telemetry:** APIM writes an App Insights request per MCP call with `gen_ai.tool.name`. The
+  runtime's request span carries `enduser.id` and `secsdk.operation`.
+
+Try it once deployed (initialize, list the tools, call `kev_lookup`, with your Azure CLI sign-in):
+
+```bash
+uv run python deploy/agent-gateway/mcp_call.py --cve CVE-2024-3400     # or: make mcp-call
+```
+
+In VS Code, add it with **MCP: Add Server → HTTP**, using the URL and an
+`Authorization: Bearer <token>` header. The token lasts about an hour. Not covered yet: the MCP
+authorization spec's discovery flow (protected resource metadata), so clients must be given a
+token rather than signing in themselves.
+
 ## Limits
 
 ### What is enforced where
@@ -864,11 +903,13 @@ turn is then one trace from the adapter through the local runtime
 Azure, so the runs also show in Foundry's Traces tab for the agent:
 
 ```bash
-export APPLICATIONINSIGHTS_CONNECTION_STRING=$(az monitor app-insights component show \
-  -a <app-insights-name> -g <resource-group> --query connectionString -o tsv)
-uv run python deploy/agent-gateway/run_local.py --build --conversation   # terminal 1
-make webui-local                                                         # terminal 2
+make runtime-build        # terminal 1 (or: make runtime)
+make webui-local          # terminal 2
 ```
+
+`make runtime` and `make runtime-build` take the connection string from Terraform's
+`application_insights_connection_string` output, unless `APPLICATIONINSIGHTS_CONNECTION_STRING`
+is already set. Add `CONVERSATION=1` (`run_local.py --conversation`) for the conversation view.
 
 `--conversation` records each run's input and final reply on its `invoke_agent` span
 (`gen_ai.input.messages` / `gen_ai.output.messages`, as `AGW_CAPTURE_CONVERSATION=true` does

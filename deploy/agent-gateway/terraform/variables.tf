@@ -200,3 +200,15 @@ variable "github_oidc_subject_prefix" {
   type        = string
   default     = ""
 }
+
+variable "enable_mcp_tools" {
+  description = "Proof of concept: expose secsdk's kev.lookup as an MCP tool in APIM (MCP server agw-mcp at <gateway>/secsdk-mcp/mcp), behind the same Entra sign-in as the agents API. Needs the runtime (runtime_image) with the /tools/kev-lookup endpoint."
+  type        = bool
+  default     = false
+}
+
+variable "mcp_calls_per_minute" {
+  description = "MCP requests each user may make per minute (rate-limit-by-key on the token's oid)."
+  type        = number
+  default     = 30
+}

@@ -638,3 +638,48 @@ def test_request_span_carries_agent_ids_for_foundry(spans):
     assert request_span.attributes["gen_ai.agent.name"] == "cve-triage"
     assert request_span.attributes["gen_ai.conversation.id"] == "conv-7"
     assert request_span.attributes["agw.run_id"] == "run-9"
+
+
+# ----- tools as plain HTTP (the MCP tool behind APIM) -------------------------------------------
+
+
+class FakeSdk:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, operation, params):
+        self.calls.append((operation, params))
+        if params["cve_id"] == "CVE-1999-0001":
+            return Result(
+                ok=False, operation=operation, error={"code": "not_found", "message": "Not in KEV"}
+            )
+        return Result(ok=True, operation=operation, data={"cve_id": params["cve_id"]})
+
+
+def _tools_app():
+    from fastapi.testclient import TestClient
+
+    from agw_runtime.app import create_app
+
+    sdk = FakeSdk()
+    return TestClient(create_app(AgentRunner(FakeModel()), {}, sdk=sdk)), sdk
+
+
+def test_kev_lookup_tool_returns_the_secsdk_envelope():
+    client, sdk = _tools_app()
+    res = client.get("/tools/kev-lookup", params={"cve_id": "CVE-2024-3400"}, headers=HEADERS)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True and body["operation"] == "kev.lookup"
+    assert body["data"] == {"cve_id": "CVE-2024-3400"}
+    assert sdk.calls == [("kev.lookup", {"cve_id": "CVE-2024-3400"})]
+    missing = client.get("/tools/kev-lookup", params={"cve_id": "CVE-1999-0001"}, headers=HEADERS)
+    assert missing.status_code == 200 and missing.json()["error"]["code"] == "not_found"
+
+
+def test_kev_lookup_tool_needs_gateway_context_and_a_cve_id():
+    client, sdk = _tools_app()
+    assert client.get("/tools/kev-lookup", params={"cve_id": "CVE-2024-3400"}).status_code == 401
+    bad = client.get("/tools/kev-lookup", params={"cve_id": "not-a-cve"}, headers=HEADERS)
+    assert bad.status_code == 422
+    assert sdk.calls == []

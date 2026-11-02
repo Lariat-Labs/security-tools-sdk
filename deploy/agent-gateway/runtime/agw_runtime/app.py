@@ -8,6 +8,8 @@ APIM sets from the user's validated token, can be trusted here.
     POST /agents/{agent}/a2a     Agent2Agent JSON-RPC (message/send), for Copilot Studio
     GET  /agents/{agent}/a2a/.well-known/agent.json   A2A agent card (public)
     POST /agents/{agent}/runs    {"input": "...", "history": [{"role": "user", "content": "..."}]}
+    GET  /tools/kev-lookup       ?cve_id=CVE-...  one secsdk operation as a plain HTTP tool;
+                                 APIM exposes it as an MCP tool (terraform: enable_mcp_tools)
     GET  /healthz
 
 Environment:
@@ -28,11 +30,11 @@ import os
 from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from secsdk import telemetry
+from secsdk import Client, CoreSettings, telemetry
 
 from . import __version__, a2a
 from .agents import AgentDefinition, load_agents
@@ -40,6 +42,7 @@ from .credentials import DEV_TOKEN_ENV, credential_from_env
 from .loop import AgentRunner, GatewayError, GatewayLimitError, GatewayModelClient, UserContext
 
 Text = Annotated[str, Field(min_length=1, max_length=20_000)]
+CVE_ID = r"^CVE-\d{4}-\d{4,}$"
 
 
 class HistoryMessage(BaseModel):
@@ -119,11 +122,14 @@ def _tag_request_span(request: Request, agent: str, ctx: UserContext) -> None:
 
 
 def create_app(
-    runner: AgentRunner | None = None, agents: dict[str, AgentDefinition] | None = None
+    runner: AgentRunner | None = None,
+    agents: dict[str, AgentDefinition] | None = None,
+    sdk: Client | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Agent gateway runtime", version=__version__)
     catalog = agents if agents is not None else load_agents()
     state: dict[str, AgentRunner] = {}
+    tools_sdk: dict[str, Client] = {"sdk": sdk} if sdk is not None else {}
     if runner is not None:
         state["runner"] = runner
     elif os.environ.get(DEV_TOKEN_ENV):
@@ -184,6 +190,31 @@ def create_app(
             status = exc.status if 400 <= exc.status < 500 else 502
             return _error(status, exc.code, exc.message)
         return result.to_dict()
+
+    # ----- tools as plain HTTP (APIM turns these operations into MCP tools) --------------------
+
+    @app.get("/tools/kev-lookup")
+    def kev_lookup_tool(
+        request: Request,
+        cve_id: Annotated[str, Query(pattern=CVE_ID, description="CVE id, e.g. CVE-2024-3400")],
+    ) -> Any:
+        """Look up a CVE in CISA's Known Exploited Vulnerabilities catalog (MCP tool via APIM)."""
+        user = request.headers.get("x-agw-user", "")
+        if not user:  # APIM sets it from the caller's validated token
+            return _error(401, "missing_context", "Call this service through the agent gateway.")
+        span = getattr(request.state, "server_span", None)
+        if span is not None and span.is_recording():
+            span.set_attribute("enduser.id", user)
+            span.set_attribute("gen_ai.operation.name", "execute_tool")
+            span.set_attribute("gen_ai.tool.name", "kev_lookup")
+            span.set_attribute("secsdk.operation", "kev.lookup")
+            client_app = request.headers.get("x-agw-client", "")
+            if client_app:
+                span.set_attribute("agw.client_app", client_app[:64])
+        if "sdk" not in tools_sdk:
+            tools_sdk["sdk"] = Client(CoreSettings())
+        # The secsdk envelope, ok or not: an agent reads "ok" and "error" like any tool result.
+        return tools_sdk["sdk"].execute("kev.lookup", {"cve_id": cve_id}).to_dict()
 
     # ----- Agent2Agent (Copilot Studio) --------------------------------------------------------
 
